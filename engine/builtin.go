@@ -1454,9 +1454,9 @@ func SetInput(vm *VM, streamOrAlias Term, k Cont, env *Env) *Promise {
 		return Error(permissionError(operationInput, permissionTypeStream, streamOrAlias, env))
 	}
 
-	vm.mu.Lock()
-	vm.input = s
-	vm.mu.Unlock()
+	// Use VM helper which handles locking and updates the streams registry
+	// in the correct order (vm.mu then vm.streams.mu).
+	vm.SetUserInput(s)
 	return k(env)
 }
 
@@ -1471,9 +1471,9 @@ func SetOutput(vm *VM, streamOrAlias Term, k Cont, env *Env) *Promise {
 		return Error(permissionError(operationOutput, permissionTypeStream, streamOrAlias, env))
 	}
 
-	vm.mu.Lock()
-	vm.output = s
-	vm.mu.Unlock()
+	// Use VM helper which handles locking and updates the streams registry
+	// in the correct order (vm.mu then vm.streams.mu).
+	vm.SetUserOutput(s)
 	return k(env)
 }
 
@@ -2926,13 +2926,12 @@ func SetPrologFlag(vm *VM, flag, value Term, k Cont, env *Env) *Promise {
 		case Variable:
 			return Error(InstantiationError(env))
 		case Atom:
-			// Some flags mutate VM-level fields; protect modifications with the VM lock when needed.
-			vm.mu.Lock()
+			// Call the modifier which is responsible for acquiring any
+			// necessary VM locks. This centralizes locking inside the VM
+			// helper functions rather than holding vm.mu here.
 			if err := modify(vm, v); err != nil {
-				vm.mu.Unlock()
 				return Error(err)
 			}
-			vm.mu.Unlock()
 			return k(env)
 		default:
 			return Error(domainError(validDomainFlagValue, atomPlus.Apply(flag, value), env))
@@ -2945,9 +2944,9 @@ func SetPrologFlag(vm *VM, flag, value Term, k Cont, env *Env) *Promise {
 func modifyCharConversion(vm *VM, value Atom) error {
 	switch value {
 	case atomOn:
-		vm.charConvEnabled = true
+		vm.SetCharConvEnabled(true)
 	case atomOff:
-		vm.charConvEnabled = false
+		vm.SetCharConvEnabled(false)
 	default:
 		return domainError(validDomainFlagValue, atomPlus.Apply(atomCharConversion, value), nil)
 	}
@@ -2957,9 +2956,9 @@ func modifyCharConversion(vm *VM, value Atom) error {
 func modifyDebug(vm *VM, value Atom) error {
 	switch value {
 	case atomOn:
-		vm.debug = true
+		vm.SetDebug(true)
 	case atomOff:
-		vm.debug = false
+		vm.SetDebug(false)
 	default:
 		return domainError(validDomainFlagValue, atomPlus.Apply(atomDebug, value), nil)
 	}
@@ -2969,11 +2968,11 @@ func modifyDebug(vm *VM, value Atom) error {
 func modifyUnknown(vm *VM, value Atom) error {
 	switch value {
 	case atomError:
-		vm.unknown = unknownError
+		vm.SetUnknown(unknownError)
 	case atomWarning:
-		vm.unknown = unknownWarning
+		vm.SetUnknown(unknownWarning)
 	case atomFail:
-		vm.unknown = unknownFail
+		vm.SetUnknown(unknownFail)
 	default:
 		return domainError(validDomainFlagValue, atomPlus.Apply(atomUnknown, value), nil)
 	}
@@ -2983,11 +2982,11 @@ func modifyUnknown(vm *VM, value Atom) error {
 func modifyDoubleQuotes(vm *VM, value Atom) error {
 	switch value {
 	case atomCodes:
-		vm.doubleQuotes = doubleQuotesCodes
+		vm.SetDoubleQuotes(doubleQuotesCodes)
 	case atomChars:
-		vm.doubleQuotes = doubleQuotesChars
+		vm.SetDoubleQuotes(doubleQuotesChars)
 	case atomAtom:
-		vm.doubleQuotes = doubleQuotesAtom
+		vm.SetDoubleQuotes(doubleQuotesAtom)
 	default:
 		return domainError(validDomainFlagValue, atomPlus.Apply(atomDoubleQuotes, value), nil)
 	}
@@ -3011,19 +3010,18 @@ func CurrentPrologFlag(vm *VM, flag, value Term, k Cont, env *Env) *Promise {
 	}
 
 	pattern := tuple(flag, value)
-	vm.mu.RLock()
+	fs := vm.FlagsSnapshot()
 	flags := []Term{
 		tuple(atomBounded, atomTrue),
 		tuple(atomMaxInteger, maxInt),
 		tuple(atomMinInteger, minInt),
 		tuple(atomIntegerRoundingFunction, atomTowardZero),
-		tuple(atomCharConversion, onOff(vm.charConvEnabled)),
-		tuple(atomDebug, onOff(vm.debug)),
+		tuple(atomCharConversion, onOff(fs.charConvEnabled)),
+		tuple(atomDebug, onOff(fs.debug)),
 		tuple(atomMaxArity, atomUnbounded),
-		tuple(atomUnknown, NewAtom(vm.unknown.String())),
-		tuple(atomDoubleQuotes, NewAtom(vm.doubleQuotes.String())),
+		tuple(atomUnknown, NewAtom(fs.unknown.String())),
+		tuple(atomDoubleQuotes, NewAtom(fs.doubleQuotes.String())),
 	}
-	vm.mu.RUnlock()
 	ks := make([]func(context.Context) *Promise, len(flags))
 	for i := range flags {
 		f := flags[i]

@@ -680,6 +680,27 @@ func (vm *VM) SetCharConvEnabled(b bool) {
 	vm.mu.Unlock()
 }
 
+// SetDebug enables or disables VM debug mode.
+func (vm *VM) SetDebug(b bool) {
+	vm.mu.Lock()
+	vm.debug = b
+	vm.mu.Unlock()
+}
+
+// SetUnknown sets the unknownAction for the VM.
+func (vm *VM) SetUnknown(u unknownAction) {
+	vm.mu.Lock()
+	vm.unknown = u
+	vm.mu.Unlock()
+}
+
+// SetDoubleQuotes updates the VM's doubleQuotes handling.
+func (vm *VM) SetDoubleQuotes(dq doubleQuotes) {
+	vm.mu.Lock()
+	vm.doubleQuotes = dq
+	vm.mu.Unlock()
+}
+
 // MarkLoaded records that filename is being/has been loaded. It returns
 // true if the filename was already present (i.e., already loading/loaded),
 // or false if it was newly marked.
@@ -712,6 +733,27 @@ func (vm *VM) IsLoaded(f string) bool {
 	_, ok := vm.loaded[f]
 	vm.mu.RUnlock()
 	return ok
+}
+
+// flagsSnapshot bundles several VM runtime flags read under a single lock.
+type flagsSnapshot struct {
+	charConvEnabled bool
+	debug           bool
+	unknown         unknownAction
+	doubleQuotes    doubleQuotes
+}
+
+// FlagsSnapshot returns a consistent snapshot of commonly-read VM flags.
+func (vm *VM) FlagsSnapshot() flagsSnapshot {
+	vm.mu.RLock()
+	fs := flagsSnapshot{
+		charConvEnabled: vm.charConvEnabled,
+		debug:           vm.debug,
+		unknown:         vm.unknown,
+		doubleQuotes:    vm.doubleQuotes,
+	}
+	vm.mu.RUnlock()
+	return fs
 }
 
 // bytecodeEqual compares two bytecode sequences for equality. We use a deep
