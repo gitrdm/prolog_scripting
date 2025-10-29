@@ -201,26 +201,15 @@ func (vm *VM) ensureLoaded(ctx context.Context, file Term, env *Env) error {
 		return err
 	}
 
-	// Mark file as loading under lock to avoid races with concurrent Consult/ensureLoaded.
-	vm.mu.Lock()
-	if vm.loaded == nil {
-		vm.loaded = map[string]struct{}{}
-	}
-	if _, ok := vm.loaded[f]; ok {
-		vm.mu.Unlock()
+	// Mark file as loading to avoid races with concurrent Consult/ensureLoaded.
+	if vm.MarkLoaded(f) {
 		return nil
 	}
 
-	// It's too early to say it's fully loaded. Yet this avoids recursive load of the same file.
-	vm.loaded[f] = struct{}{}
-	vm.mu.Unlock()
-
 	if err := vm.Compile(ctx, string(b)); err != nil {
-		// Remove the 'loading' mark under the VM lock to avoid races with
-		// concurrent calls to ensureLoaded/Consult.
-		vm.mu.Lock()
-		delete(vm.loaded, f) // It wasn't fully loaded after all.
-		vm.mu.Unlock()
+		// Remove the 'loading' mark to avoid races with concurrent calls to
+		// ensureLoaded/Consult when loading failed.
+		vm.UnmarkLoaded(f)
 		return err
 	}
 

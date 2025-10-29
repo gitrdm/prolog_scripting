@@ -651,6 +651,69 @@ func (vm *VM) CharConvEnabled() bool {
 	return b
 }
 
+// SetCharConversion registers or updates a character conversion in a
+// concurrency-safe manner. The VM lock is acquired internally.
+func (vm *VM) SetCharConversion(from, to rune) {
+	vm.mu.Lock()
+	if vm.charConversions == nil {
+		vm.charConversions = map[rune]rune{}
+	}
+	vm.charConversions[from] = to
+	vm.mu.Unlock()
+}
+
+// ClearCharConversion removes a character conversion if present. The VM
+// lock is acquired internally.
+func (vm *VM) ClearCharConversion(from rune) {
+	vm.mu.Lock()
+	if vm.charConversions != nil {
+		delete(vm.charConversions, from)
+	}
+	vm.mu.Unlock()
+}
+
+// SetCharConvEnabled sets whether character conversions are enabled. It
+// acquires the VM lock internally.
+func (vm *VM) SetCharConvEnabled(b bool) {
+	vm.mu.Lock()
+	vm.charConvEnabled = b
+	vm.mu.Unlock()
+}
+
+// MarkLoaded records that filename is being/has been loaded. It returns
+// true if the filename was already present (i.e., already loading/loaded),
+// or false if it was newly marked.
+func (vm *VM) MarkLoaded(f string) bool {
+	vm.mu.Lock()
+	if vm.loaded == nil {
+		vm.loaded = map[string]struct{}{}
+	}
+	if _, ok := vm.loaded[f]; ok {
+		vm.mu.Unlock()
+		return true
+	}
+	vm.loaded[f] = struct{}{}
+	vm.mu.Unlock()
+	return false
+}
+
+// UnmarkLoaded removes the loading/loaded mark for filename.
+func (vm *VM) UnmarkLoaded(f string) {
+	vm.mu.Lock()
+	if vm.loaded != nil {
+		delete(vm.loaded, f)
+	}
+	vm.mu.Unlock()
+}
+
+// IsLoaded reports whether filename is present in the loaded set.
+func (vm *VM) IsLoaded(f string) bool {
+	vm.mu.RLock()
+	_, ok := vm.loaded[f]
+	vm.mu.RUnlock()
+	return ok
+}
+
 // bytecodeEqual compares two bytecode sequences for equality. We use a deep
 // comparison of the operand to keep the check simple and robust across
 // different operand types (Term, procedureIndicator, Integer, etc.).

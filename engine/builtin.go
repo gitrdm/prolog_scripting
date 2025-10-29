@@ -2830,17 +2830,11 @@ func CharConversion(vm *VM, inChar, outChar Term, k Cont, env *Env) *Promise {
 				return Error(representationError(flagCharacter, env))
 			}
 
-			vm.mu.Lock()
-			if vm.charConversions == nil {
-				vm.charConversions = map[rune]rune{}
-			}
 			if i[0] == o[0] {
-				delete(vm.charConversions, i[0])
-				vm.mu.Unlock()
+				vm.ClearCharConversion(i[0])
 				return k(env)
 			}
-			vm.charConversions[i[0]] = o[0]
-			vm.mu.Unlock()
+			vm.SetCharConversion(i[0], o[0])
 			return k(env)
 		default:
 			return Error(representationError(flagCharacter, env))

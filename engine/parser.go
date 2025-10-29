@@ -41,32 +41,14 @@ type ParsedVariable struct {
 
 // NewParser creates a new parser from the current VM and io.RuneReader.
 func NewParser(vm *VM, r io.RuneReader) *Parser {
-	// Snapshot operators and doubleQuotes under VM lock so parser can access
-	// them without holding vm.mu during parsing (hot path). If operators is
-	// nil we allocate an empty map on the VM to preserve previous behavior
-	// where NewParser initialized vm.operators lazily.
-	vm.mu.Lock()
-	if vm.operators == nil {
-		vm.operators = operators{}
-	}
-	// copy operators map
-	ops := make(operators, len(vm.operators))
-	for k, v := range vm.operators {
-		ops[k] = v
-	}
-	dq := vm.doubleQuotes
-	vm.mu.Unlock()
-
 	p := &Parser{
 		lexer: Lexer{
 			input: newRuneRingBuffer(r),
 		},
-		operators:    ops,
-		doubleQuotes: dq,
 	}
 
-	// Initialize lexer char conversions from the VM snapshot so the lexer
-	// applies the same conversions during parsing.
+	// Populate parser snapshots (operators, double-quotes, char conversions)
+	// from the VM using concurrency-safe accessors.
 	p.Refresh(vm)
 
 	return p
@@ -78,27 +60,14 @@ func NewParser(vm *VM, r io.RuneReader) *Parser {
 // being parsed). The method takes the VM lock briefly to copy the current
 // operator table and setting.
 func (p *Parser) Refresh(vm *VM) {
-	vm.mu.Lock()
-	if vm.operators == nil {
-		vm.operators = operators{}
+	// Use VM accessors that take the VM read-lock internally and return
+	// shallow copies suitable for lock-free use by the parser/lexer.
+	ops := vm.OperatorsCopy()
+	if ops == nil {
+		ops = operators{}
 	}
-	// copy operators map
-	ops := make(operators, len(vm.operators))
-	for k, v := range vm.operators {
-		ops[k] = v
-	}
-	dq := vm.doubleQuotes
-
-	// copy char conversions
-	var cc map[rune]rune
-	if vm.charConversions != nil {
-		cc = make(map[rune]rune, len(vm.charConversions))
-		for k, v := range vm.charConversions {
-			cc[k] = v
-		}
-	}
-
-	vm.mu.Unlock()
+	dq := vm.DoubleQuotes()
+	cc := vm.CharConversionsCopy()
 
 	p.operators = ops
 	p.doubleQuotes = dq
