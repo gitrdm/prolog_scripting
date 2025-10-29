@@ -586,6 +586,47 @@ func (vm *VM) ProceduresCopy() map[procedureIndicator]procedure {
 	return cp
 }
 
+// Input returns the current input stream in a concurrency-safe way.
+func (vm *VM) Input() *Stream {
+	vm.mu.RLock()
+	s := vm.input
+	vm.mu.RUnlock()
+	return s
+}
+
+// Output returns the current output stream in a concurrency-safe way.
+func (vm *VM) Output() *Stream {
+	vm.mu.RLock()
+	s := vm.output
+	vm.mu.RUnlock()
+	return s
+}
+
+// OperatorsCopy returns a shallow copy of the operators table. The copy can
+// be safely accessed without holding vm.mu.
+func (vm *VM) OperatorsCopy() operators {
+	vm.mu.RLock()
+	if vm.operators == nil {
+		vm.mu.RUnlock()
+		return nil
+	}
+	cp := make(operators, len(vm.operators))
+	for k, v := range vm.operators {
+		cp[k] = v
+	}
+	vm.mu.RUnlock()
+	return cp
+}
+
+// DoubleQuotes returns the current double-quotes setting in a concurrency-safe
+// way.
+func (vm *VM) DoubleQuotes() doubleQuotes {
+	vm.mu.RLock()
+	dq := vm.doubleQuotes
+	vm.mu.RUnlock()
+	return dq
+}
+
 // bytecodeEqual compares two bytecode sequences for equality. We use a deep
 // comparison of the operand to keep the check simple and robust across
 // different operand types (Term, procedureIndicator, Integer, etc.).

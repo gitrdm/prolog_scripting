@@ -1417,7 +1417,7 @@ func Abolish(vm *VM, pi Term, k Cont, env *Env) *Promise {
 func CurrentInput(vm *VM, stream Term, k Cont, env *Env) *Promise {
 	switch env.Resolve(stream).(type) {
 	case Variable, *Stream:
-		return Unify(vm, stream, vm.input, k, env)
+		return Unify(vm, stream, vm.Input(), k, env)
 	default:
 		return Error(domainError(validDomainStream, stream, env))
 	}
@@ -1427,7 +1427,7 @@ func CurrentInput(vm *VM, stream Term, k Cont, env *Env) *Promise {
 func CurrentOutput(vm *VM, stream Term, k Cont, env *Env) *Promise {
 	switch env.Resolve(stream).(type) {
 	case Variable, *Stream:
-		return Unify(vm, stream, vm.output, k, env)
+		return Unify(vm, stream, vm.Output(), k, env)
 	default:
 		return Error(domainError(validDomainStream, stream, env))
 	}

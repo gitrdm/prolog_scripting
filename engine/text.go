@@ -94,7 +94,16 @@ func (vm *VM) compile(ctx context.Context, text *text, s string, args ...interfa
 		return err
 	}
 
-	for p.More() {
+	for {
+		if !p.More() {
+			break
+		}
+		// Refresh parser snapshot so operator/directive changes performed by
+		// previously executed directives in the same source are visible to
+		// subsequent parses. This keeps parsing semantics consistent with the
+		// previous implementation where the parser observed live VM operators.
+		p.Refresh(vm)
+
 		p.Vars = p.Vars[:]
 		t, err := p.Term()
 		if err != nil {

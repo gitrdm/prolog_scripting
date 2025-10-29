@@ -41,16 +41,51 @@ type ParsedVariable struct {
 
 // NewParser creates a new parser from the current VM and io.RuneReader.
 func NewParser(vm *VM, r io.RuneReader) *Parser {
+	// Snapshot operators and doubleQuotes under VM lock so parser can access
+	// them without holding vm.mu during parsing (hot path). If operators is
+	// nil we allocate an empty map on the VM to preserve previous behavior
+	// where NewParser initialized vm.operators lazily.
+	vm.mu.Lock()
 	if vm.operators == nil {
 		vm.operators = operators{}
 	}
+	// copy operators map
+	ops := make(operators, len(vm.operators))
+	for k, v := range vm.operators {
+		ops[k] = v
+	}
+	dq := vm.doubleQuotes
+	vm.mu.Unlock()
+
 	return &Parser{
 		lexer: Lexer{
 			input: newRuneRingBuffer(r),
 		},
-		operators:    vm.operators,
-		doubleQuotes: vm.doubleQuotes,
+		operators:    ops,
+		doubleQuotes: dq,
 	}
+}
+
+// Refresh updates parser's snapshot of operators and doubleQuotes from the VM.
+// It should be called when VM-level operator/double-quotes settings may have
+// changed (for example, after executing op/3 directives in the same source
+// being parsed). The method takes the VM lock briefly to copy the current
+// operator table and setting.
+func (p *Parser) Refresh(vm *VM) {
+	vm.mu.Lock()
+	if vm.operators == nil {
+		vm.operators = operators{}
+	}
+	// copy operators map
+	ops := make(operators, len(vm.operators))
+	for k, v := range vm.operators {
+		ops[k] = v
+	}
+	dq := vm.doubleQuotes
+	vm.mu.Unlock()
+
+	p.operators = ops
+	p.doubleQuotes = dq
 }
 
 // SetPlaceholder registers placeholder and its arguments. Every occurrence of placeholder will be replaced by arguments.
