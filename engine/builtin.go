@@ -9,9 +9,21 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 )
+
+// debug instrumentation for Retract. Nil by default; tests can set this to
+// a non-nil pointer to collect diagnostic counts.
+type retractStats struct {
+	attempts    uint64 // number of times the inner alternative was executed
+	comparisons uint64 // number of bytecode comparisons performed
+	casSuccess  uint64 // number of successful CAS claims
+	casFail     uint64 // number of failed CAS attempts
+}
+
+var debugRetractStats *retractStats
 
 // Repeat repeats the continuation until it succeeds.
 func Repeat(_ *VM, k Cont, env *Env) *Promise {
@@ -669,7 +681,7 @@ func CurrentOp(vm *VM, priority, specifier, op Term, k Cont, env *Env) *Promise 
 
 // Assertz appends t to the database.
 func Assertz(vm *VM, t Term, k Cont, env *Env) *Promise {
-	if err := assertMerge(vm, t, func(existing, new []clause) []clause {
+	if err := assertMerge(vm, t, func(existing, new []*clause) []*clause {
 		return append(existing, new...)
 	}, env); err != nil {
 		return Error(err)
@@ -679,7 +691,7 @@ func Assertz(vm *VM, t Term, k Cont, env *Env) *Promise {
 
 // Asserta prepends t to the database.
 func Asserta(vm *VM, t Term, k Cont, env *Env) *Promise {
-	if err := assertMerge(vm, t, func(existing, new []clause) []clause {
+	if err := assertMerge(vm, t, func(existing, new []*clause) []*clause {
 		return append(new, existing...)
 	}, env); err != nil {
 		return Error(err)
@@ -687,7 +699,7 @@ func Asserta(vm *VM, t Term, k Cont, env *Env) *Promise {
 	return k(env)
 }
 
-func assertMerge(vm *VM, t Term, merge func([]clause, []clause) []clause, env *Env) error {
+func assertMerge(vm *VM, t Term, merge func([]*clause, []*clause) []*clause, env *Env) error {
 	pi, arg, err := piArg(t, env)
 	if err != nil {
 		return err
@@ -725,7 +737,36 @@ func assertMerge(vm *VM, t Term, merge func([]clause, []clause) []clause, env *E
 	}
 
 	u.clauses = merge(u.clauses, added)
+
+	// If a significant fraction of clauses is marked deleted, compact the
+	// slice to reclaim memory and speed future scans. We do this under the
+	// vm.mu lock to avoid races with other writers.
+	deleted := 0
+	for _, c := range u.clauses {
+		if atomic.LoadUint32(&c.deleted) != 0 {
+			deleted++
+		}
+	}
+	// heuristic: compact if more than 32 deleted or more than 25% deleted
+	if deleted > 0 && (deleted > 32 || deleted*4 > len(u.clauses)) {
+		compactClauses(u)
+	}
 	return nil
+}
+
+// compactClauses removes clauses that are marked deleted. Caller must hold
+// vm.mu (or otherwise synchronize) to avoid races while replacing the slice.
+func compactClauses(u *userDefined) {
+    if len(u.clauses) == 0 {
+        return
+    }
+    out := make([]*clause, 0, len(u.clauses))
+    for _, c := range u.clauses {
+        if atomic.LoadUint32(&c.deleted) == 0 {
+            out = append(out, c)
+        }
+    }
+    u.clauses = out
 }
 
 // BagOf collects all the solutions of goal as instances, which unify with template. instances may contain duplications.
@@ -1110,19 +1151,61 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 		return Error(permissionError(operationModify, permissionTypeStaticProcedure, pi.Term(), env))
 	}
 
-	deleted := 0
-	ks := make([]func(context.Context) *Promise, len(u.clauses))
-	for i, c := range u.clauses {
+	// Snapshot the clauses under the VM read lock to avoid races while other
+	// goroutines may concurrently mutate the slice.
+	vm.mu.RLock()
+	snap := make([]*clause, len(u.clauses))
+	copy(snap, u.clauses)
+	vm.mu.RUnlock()
+
+	ks := make([]func(context.Context) *Promise, len(snap))
+	for i, c := range snap {
 		i := i
+		// capture a copy of the clause's compiled bytecode and the raw term to
+		// avoid referencing the backing slice while other goroutines may mutate it.
+		capturedBC := make(bytecode, len(c.bytecode))
+		copy(capturedBC, c.bytecode)
 		raw := rulify(c.raw, env)
+
 		ks[i] = func(_ context.Context) *Promise {
 			return Unify(vm, t, raw, func(env *Env) *Promise {
-				j := i - deleted
-				vm.mu.Lock()
-				u.clauses, u.clauses[len(u.clauses)-1] = append(u.clauses[:j], u.clauses[j+1:]...), clause{}
-				vm.mu.Unlock()
-				deleted++
-				return k(env)
+				if debugRetractStats != nil {
+					atomic.AddUint64(&debugRetractStats.attempts, 1)
+				}
+				// Attempt to claim the specific clause this alternative corresponds to.
+				idx := i
+				// skip already-deleted clauses
+				if atomic.LoadUint32(&snap[idx].deleted) != 0 {
+					return Bool(false)
+				}
+				if debugRetractStats != nil {
+					atomic.AddUint64(&debugRetractStats.comparisons, 1)
+				}
+				if bytecodeEqual(snap[idx].bytecode, capturedBC) {
+					claimed := atomic.CompareAndSwapUint32(&snap[idx].deleted, 0, 1)
+					if debugRetractStats != nil {
+						if claimed {
+							atomic.AddUint64(&debugRetractStats.casSuccess, 1)
+						} else {
+							atomic.AddUint64(&debugRetractStats.casFail, 1)
+						}
+					}
+					if claimed {
+						// Compact under the VM lock so tests that expect the
+						// clause slice to no longer contain deleted entries see
+						// the removal immediately. We must not hold vm.mu while
+						// invoking the user continuation, so lock, compact,
+						// unlock, then call the continuation.
+						vm.mu.Lock()
+						compactClauses(u)
+						vm.mu.Unlock()
+						return k(env)
+					}
+					return Bool(false)
+				}
+				// No matching clause found in the snapshot (another goroutine
+				// removed it or it never matched).
+				return Bool(false)
 			}, env)
 		}
 	}
@@ -2014,16 +2097,20 @@ func Clause(vm *VM, head, body Term, k Cont, env *Env) *Promise {
 		return Error(permissionError(operationAccess, permissionTypePrivateProcedure, pi.Term(), env))
 	}
 
-	ks := make([]func(context.Context) *Promise, len(u.clauses))
-	for i, c := range u.clauses {
+	ks := make([]func(context.Context) *Promise, 0, len(u.clauses))
+	for i := range u.clauses {
+		if atomic.LoadUint32(&u.clauses[i].deleted) != 0 {
+			continue
+		}
+		c := u.clauses[i]
 		cp, err := renamedCopy(c.raw, nil, env)
 		if err != nil {
 			return Error(err)
 		}
 		r := rulify(cp, env)
-		ks[i] = func(context.Context) *Promise {
+		ks = append(ks, func(context.Context) *Promise {
 			return Unify(vm, atomIf.Apply(head, body), r, k, env)
-		}
+		})
 	}
 	return Delay(ks...)
 }

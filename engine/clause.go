@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 )
 
 type userDefined struct {
@@ -15,20 +16,24 @@ type userDefined struct {
 	clauses
 }
 
-type clauses []clause
+type clauses []*clause
 
 func (cs clauses) call(vm *VM, args []Term, k Cont, env *Env) *Promise {
 	var p *Promise
-	ks := make([]func(context.Context) *Promise, len(cs))
+	ks := make([]func(context.Context) *Promise, 0, len(cs))
 	for i := range cs {
-		i, c := i, cs[i]
-		ks[i] = func(context.Context) *Promise {
+		c := cs[i]
+		// skip clauses marked deleted
+		if atomic.LoadUint32(&c.deleted) != 0 {
+			continue
+		}
+		ks = append(ks, func(context.Context) *Promise {
 			vars := make([]Variable, len(c.vars))
 			for i := range vars {
 				vars[i] = NewVariable()
 			}
 			return vm.exec(c.bytecode, vars, k, args, nil, env, p)
-		}
+		})
 	}
 	p = Delay(ks...)
 	return p
@@ -41,19 +46,20 @@ func compile(t Term, env *Env) (clauses, error) {
 		head, body := t.Arg(0), t.Arg(1)
 		iter := altIterator{Alt: body, Env: env}
 		for iter.Next() {
-			c, err := compileClause(head, iter.Current(), env)
-			if err != nil {
-				return nil, typeError(validTypeCallable, body, env)
+				c, err := compileClause(head, iter.Current(), env)
+				if err != nil {
+					return nil, typeError(validTypeCallable, body, env)
+				}
+				c.raw = t
+				// store as pointer
+				cs = append(cs, &c)
 			}
-			c.raw = t
-			cs = append(cs, c)
-		}
-		return cs, nil
+			return cs, nil
 	}
 
-	c, err := compileClause(t, nil, env)
-	c.raw = env.simplify(t)
-	return []clause{c}, err
+		c, err := compileClause(t, nil, env)
+		c.raw = env.simplify(t)
+		return []*clause{&c}, err
 }
 
 type clause struct {
@@ -61,6 +67,8 @@ type clause struct {
 	raw      Term
 	vars     []Variable
 	bytecode bytecode
+	// deleted is a marker (0 == active, 1 == deleted) set atomically by Retract/Abolish.
+	deleted uint32
 }
 
 func compileClause(head Term, body Term, env *Env) (clause, error) {

@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -536,6 +537,24 @@ func (vm *VM) Clone() *VM {
 	// so the clone is safe to use concurrently as a per-request VM.
 
 	return n
+}
+
+// bytecodeEqual compares two bytecode sequences for equality. We use a deep
+// comparison of the operand to keep the check simple and robust across
+// different operand types (Term, procedureIndicator, Integer, etc.).
+func bytecodeEqual(a, b bytecode) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].opcode != b[i].opcode {
+			return false
+		}
+		if !reflect.DeepEqual(a[i].operand, b[i].operand) {
+			return false
+		}
+	}
+	return true
 }
 
 // Apply applies p to args.
