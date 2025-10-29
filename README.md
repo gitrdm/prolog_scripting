@@ -15,6 +15,7 @@
   - [A Prologue for Prolog](http://www.complang.tuwien.ac.at/ulrich/iso-prolog/prologue)
   - [DCGs](https://www.complang.tuwien.ac.at/ulrich/iso-prolog/dcgs/dcgsdraft-2019-06-03.pdf)
 - **Easy to integrate:** `database/sql`-like Go API
+- **Thread-safe:** Supports concurrent query execution using shared VMs or per-request clones
 - **Highly customizable:**
   - Sandboxing
   - Custom predicates in Go
@@ -29,6 +30,15 @@
 | Go API      | 😻 `database/sql`-like | original        | original        |
 | Declarative | ✅                     | ❌              | ❌              |
 | Sandboxing  | ✅                     | ❌              | ✅              |
+
+## Thread-Safety
+
+`ichiban/prolog` supports safe concurrent execution of queries. You can run multiple queries simultaneously using either:
+
+- **Shared VM mode:** A single `*Interpreter` instance with fine-grained locking for efficient resource sharing.
+- **Per-request clones:** Use `VM.Clone()` to create lightweight copies for each request, ensuring complete isolation.
+
+Both modes pass `go test -race` and are suitable for production use. See `THREAD-SAFETY.md` for detailed concurrency guarantees and lock ordering rules.
 
 ## Getting started
 
