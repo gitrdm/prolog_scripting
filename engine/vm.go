@@ -223,9 +223,10 @@ func (vm *VM) Arrive(name Atom, args []Term, k Cont, env *Env) (promise *Promise
 	pi := procedureIndicator{name: name, arity: Integer(len(args))}
 	vm.mu.RLock()
 	p, ok := vm.procedures[pi]
+	unknown := vm.unknown
 	vm.mu.RUnlock()
 	if !ok {
-		switch vm.unknown {
+		switch unknown {
 		case unknownWarning:
 			vm.Unknown(name, args, env)
 			fallthrough
