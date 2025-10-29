@@ -46,20 +46,20 @@ func compile(t Term, env *Env) (clauses, error) {
 		head, body := t.Arg(0), t.Arg(1)
 		iter := altIterator{Alt: body, Env: env}
 		for iter.Next() {
-				c, err := compileClause(head, iter.Current(), env)
-				if err != nil {
-					return nil, typeError(validTypeCallable, body, env)
-				}
-				c.raw = t
-				// store as pointer
-				cs = append(cs, &c)
+			c, err := compileClause(head, iter.Current(), env)
+			if err != nil {
+				return nil, typeError(validTypeCallable, body, env)
 			}
-			return cs, nil
+			c.raw = t
+			// store as pointer
+			cs = append(cs, &c)
+		}
+		return cs, nil
 	}
 
-		c, err := compileClause(t, nil, env)
-		c.raw = env.simplify(t)
-		return []*clause{&c}, err
+	c, err := compileClause(t, nil, env)
+	c.raw = env.simplify(t)
+	return []*clause{&c}, err
 }
 
 type clause struct {

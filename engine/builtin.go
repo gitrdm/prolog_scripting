@@ -757,16 +757,16 @@ func assertMerge(vm *VM, t Term, merge func([]*clause, []*clause) []*clause, env
 // compactClauses removes clauses that are marked deleted. Caller must hold
 // vm.mu (or otherwise synchronize) to avoid races while replacing the slice.
 func compactClauses(u *userDefined) {
-    if len(u.clauses) == 0 {
-        return
-    }
-    out := make([]*clause, 0, len(u.clauses))
-    for _, c := range u.clauses {
-        if atomic.LoadUint32(&c.deleted) == 0 {
-            out = append(out, c)
-        }
-    }
-    u.clauses = out
+	if len(u.clauses) == 0 {
+		return
+	}
+	out := make([]*clause, 0, len(u.clauses))
+	for _, c := range u.clauses {
+		if atomic.LoadUint32(&c.deleted) == 0 {
+			out = append(out, c)
+		}
+	}
+	u.clauses = out
 }
 
 // BagOf collects all the solutions of goal as instances, which unify with template. instances may contain duplications.
