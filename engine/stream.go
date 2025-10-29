@@ -1,3 +1,18 @@
+// Stream locking guidance:
+//
+// Lock ordering must follow the project's global convention to avoid deadlocks:
+//   vm.mu -> vm.streams.mu -> s.mu
+// Acquire parent locks before child locks. Do not hold vm.mu while performing
+// blocking I/O. The streams registry uses a RWMutex (vm.streams.mu) while each
+// Stream has its own Mutex (s.mu) to protect internal buffer/position state.
+//
+// When closing a stream, remove it from the vm.streams registry before acquiring
+// s.mu to close underlying resources. This avoids lock inversion where another
+// goroutine holding vm.mu may try to call a method on the Stream that acquires s.mu.
+//
+// Prefer doing heavy or long-running operations without holding vm.mu. Snapshot
+// small read-only views under RLock where necessary.
+
 package engine
 
 import (
@@ -7,6 +22,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"sync"
 	"unsafe"
 )
 
@@ -33,6 +49,7 @@ type Stream struct {
 	eofAction   eofAction
 	reposition  bool
 	streamType  streamType
+	mu          sync.Mutex
 }
 
 // NewInputTextStream creates a new input text stream backed by the given io.Reader.
@@ -119,6 +136,9 @@ func (s *Stream) Name() string {
 // ReadByte reads a byte from the underlying source.
 // It throws an error if the stream is not an input binary stream.
 func (s *Stream) ReadByte() (byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if err := s.initRead(); err != nil {
 		return 0, err
 	}
@@ -136,6 +156,9 @@ func (s *Stream) ReadByte() (byte, error) {
 }
 
 func (s *Stream) UnreadByte() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if err := s.initRead(); err != nil {
 		return err
 	}
@@ -155,6 +178,9 @@ func (s *Stream) UnreadByte() error {
 // ReadRune reads the next rune from the underlying source.
 // It throws an error if the stream is not an input text stream.
 func (s *Stream) ReadRune() (r rune, size int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if err := s.initRead(); err != nil {
 		return 0, 0, err
 	}
@@ -171,6 +197,9 @@ func (s *Stream) ReadRune() (r rune, size int, err error) {
 }
 
 func (s *Stream) UnreadRune() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if err := s.initRead(); err != nil {
 		return err
 	}
@@ -193,6 +222,8 @@ func (s *Stream) Seek(offset int64, whence int) (int64, error) {
 	if !s.reposition {
 		return 0, errReposition
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	sk, ok := s.source.(io.Seeker)
 	if !ok {
@@ -246,6 +277,8 @@ func (s *Stream) Flush() error {
 		Sync() error
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.mode != ioModeWrite && s.mode != ioModeAppend {
 		return errWrongIOMode
 	}
@@ -262,6 +295,13 @@ func (s *Stream) Flush() error {
 
 // Close closes the underlying source/sink.
 func (s *Stream) Close() error {
+	// Remove from VM streams first to avoid lock-order inversion (do not hold s.mu while acquiring streams.mu).
+	if s.vm != nil {
+		s.vm.streams.remove(s)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if c, ok := s.source.(io.Closer); ok {
 		if err := c.Close(); err != nil {
 			return err
@@ -272,10 +312,6 @@ func (s *Stream) Close() error {
 		if err := c.Close(); err != nil {
 			return err
 		}
-	}
-
-	if s.vm != nil {
-		s.vm.streams.remove(s)
 	}
 
 	return nil
@@ -412,6 +448,8 @@ type textWriter struct {
 // It throws an error if the stream is not an output text stream.
 func (t textWriter) Write(p []byte) (int, error) {
 	s := t.stream
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	n, err := s.sink.Write(p)
 	s.position += int64(n)
 	return n, err
@@ -425,6 +463,8 @@ type binaryWriter struct {
 // It throws an error if the stream is not an output binary stream.
 func (b binaryWriter) Write(p []byte) (int, error) {
 	s := b.stream
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	n, err := s.sink.Write(p)
 	s.position += int64(n)
@@ -505,11 +545,15 @@ func (e endOfStream) Term() Term {
 }
 
 type streams struct {
+	mu      sync.RWMutex
 	elems   []*Stream
 	aliases map[Atom]*Stream
 }
 
 func (ss *streams) add(s *Stream) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
 	if s.alias != 0 {
 		if ss.aliases == nil {
 			ss.aliases = map[Atom]*Stream{}
@@ -521,6 +565,9 @@ func (ss *streams) add(s *Stream) {
 }
 
 func (ss *streams) remove(s *Stream) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
 	delete(ss.aliases, s.alias)
 	for i, e := range ss.elems {
 		if e == s {
@@ -536,6 +583,8 @@ func (ss *streams) remove(s *Stream) {
 }
 
 func (ss *streams) lookup(a Atom) (*Stream, bool) {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
 	s, ok := ss.aliases[a]
 	return s, ok
 }

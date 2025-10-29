@@ -1,3 +1,25 @@
+// Locking and concurrency guidance for this package
+//
+// Lock ordering rules (important):
+//  - vm.mu (RWMutex)  -> vm.streams.mu (RWMutex) -> s.mu (Mutex)
+//    Always acquire parent locks before child locks to avoid inversion.
+//  - Prefer read locks (RLock) for lookups (e.g. Arrive/procedure lookup). Use write locks
+//    (Lock) for mutating operations (Register, assert/retract, SetPrologFlag, installing
+//    compiled clauses, modifying vm.loaded, etc.).
+//  - Do not hold vm.mu while performing long-running work (compilation, I/O). Instead
+//    prepare data off-lock and briefly Lock() to install the result.
+//  - The interpreter hot loop (exec) must not acquire vm.mu; snapshot read-only VM tables
+//    (operators, procedure pointers) before entering the loop if needed.
+//
+// Notes:
+//  - streams.add/remove/lookup use vm.streams' locks; individual Stream objects use s.mu
+//    to protect their internal buf/position/endOfStream state.
+//  - SetUserInput/SetUserOutput must acquire vm.mu and use vm.streams in the correct order
+//    (vm.mu then vm.streams.mu) to avoid races.
+//
+// This comment serves as guidance for contributors and reviewers when adding new
+// synchronization or modifying existing code paths.
+
 package engine
 
 import (
@@ -6,6 +28,7 @@ import (
 	"io"
 	"io/fs"
 	"strings"
+	"sync"
 )
 
 type bytecode []instruction
@@ -59,6 +82,8 @@ type VM struct {
 	FS     fs.FS
 	loaded map[string]struct{}
 
+	mu sync.RWMutex
+
 	// Internal/external expression
 	operators       operators
 	charConversions map[rune]rune
@@ -75,6 +100,8 @@ type VM struct {
 
 // Register0 registers a predicate of arity 0.
 func (vm *VM) Register0(name Atom, p Predicate0) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
 	if vm.procedures == nil {
 		vm.procedures = map[procedureIndicator]procedure{}
 	}
@@ -83,6 +110,8 @@ func (vm *VM) Register0(name Atom, p Predicate0) {
 
 // Register1 registers a predicate of arity 1.
 func (vm *VM) Register1(name Atom, p Predicate1) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
 	if vm.procedures == nil {
 		vm.procedures = map[procedureIndicator]procedure{}
 	}
@@ -91,6 +120,8 @@ func (vm *VM) Register1(name Atom, p Predicate1) {
 
 // Register2 registers a predicate of arity 2.
 func (vm *VM) Register2(name Atom, p Predicate2) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
 	if vm.procedures == nil {
 		vm.procedures = map[procedureIndicator]procedure{}
 	}
@@ -99,6 +130,8 @@ func (vm *VM) Register2(name Atom, p Predicate2) {
 
 // Register3 registers a predicate of arity 3.
 func (vm *VM) Register3(name Atom, p Predicate3) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
 	if vm.procedures == nil {
 		vm.procedures = map[procedureIndicator]procedure{}
 	}
@@ -107,6 +140,8 @@ func (vm *VM) Register3(name Atom, p Predicate3) {
 
 // Register4 registers a predicate of arity 4.
 func (vm *VM) Register4(name Atom, p Predicate4) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
 	if vm.procedures == nil {
 		vm.procedures = map[procedureIndicator]procedure{}
 	}
@@ -115,6 +150,8 @@ func (vm *VM) Register4(name Atom, p Predicate4) {
 
 // Register5 registers a predicate of arity 5.
 func (vm *VM) Register5(name Atom, p Predicate5) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
 	if vm.procedures == nil {
 		vm.procedures = map[procedureIndicator]procedure{}
 	}
@@ -123,6 +160,8 @@ func (vm *VM) Register5(name Atom, p Predicate5) {
 
 // Register6 registers a predicate of arity 6.
 func (vm *VM) Register6(name Atom, p Predicate6) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
 	if vm.procedures == nil {
 		vm.procedures = map[procedureIndicator]procedure{}
 	}
@@ -131,6 +170,8 @@ func (vm *VM) Register6(name Atom, p Predicate6) {
 
 // Register7 registers a predicate of arity 7.
 func (vm *VM) Register7(name Atom, p Predicate7) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
 	if vm.procedures == nil {
 		vm.procedures = map[procedureIndicator]procedure{}
 	}
@@ -139,6 +180,8 @@ func (vm *VM) Register7(name Atom, p Predicate7) {
 
 // Register8 registers a predicate of arity 8.
 func (vm *VM) Register8(name Atom, p Predicate8) {
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
 	if vm.procedures == nil {
 		vm.procedures = map[procedureIndicator]procedure{}
 	}
@@ -177,7 +220,9 @@ func (vm *VM) Arrive(name Atom, args []Term, k Cont, env *Env) (promise *Promise
 	}
 
 	pi := procedureIndicator{name: name, arity: Integer(len(args))}
+	vm.mu.RLock()
 	p, ok := vm.procedures[pi]
+	vm.mu.RUnlock()
 	if !ok {
 		switch vm.unknown {
 		case unknownWarning:
@@ -290,16 +335,20 @@ func (vm *VM) exec(pc bytecode, vars []Variable, cont Cont, args []Term, astack 
 func (vm *VM) SetUserInput(s *Stream) {
 	s.vm = vm
 	s.alias = atomUserInput
+	vm.mu.Lock()
 	vm.streams.add(s)
 	vm.input = s
+	vm.mu.Unlock()
 }
 
 // SetUserOutput sets the given stream as user_output.
 func (vm *VM) SetUserOutput(s *Stream) {
 	s.vm = vm
 	s.alias = atomUserOutput
+	vm.mu.Lock()
 	vm.streams.add(s)
 	vm.output = s
+	vm.mu.Unlock()
 }
 
 // Predicate0 is a predicate of arity 0.
@@ -442,6 +491,51 @@ func (p procedureIndicator) String() string {
 // Term returns p as term.
 func (p procedureIndicator) Term() Term {
 	return atomSlash.Apply(p.name, p.arity)
+}
+
+// Clone creates a fresh VM configuration copied from vm. The returned VM has
+// copied predicate and operator configuration but does not share mutable
+// runtime fields such as streams, loaded files, or input/output streams.
+func (vm *VM) Clone() *VM {
+	vm.mu.RLock()
+	defer vm.mu.RUnlock()
+
+	n := &VM{}
+	n.Unknown = vm.Unknown
+	n.FS = vm.FS
+	n.unknown = vm.unknown
+
+	// copy procedures
+	if vm.procedures != nil {
+		n.procedures = make(map[procedureIndicator]procedure, len(vm.procedures))
+		for k, v := range vm.procedures {
+			n.procedures[k] = v
+		}
+	}
+
+	// copy operators
+	if vm.operators != nil {
+		n.operators = make(operators)
+		for k, v := range vm.operators {
+			n.operators[k] = v
+		}
+	}
+
+	// copy char conversions
+	if vm.charConversions != nil {
+		n.charConversions = make(map[rune]rune, len(vm.charConversions))
+		for k, v := range vm.charConversions {
+			n.charConversions[k] = v
+		}
+	}
+	n.charConvEnabled = vm.charConvEnabled
+	n.doubleQuotes = vm.doubleQuotes
+
+	// FS, Unknown, procedures, operators, and char conversions are copied.
+	// Mutable runtime fields like streams, loaded, input/output are left empty
+	// so the clone is safe to use concurrently as a per-request VM.
+
+	return n
 }
 
 // Apply applies p to args.

@@ -3,7 +3,7 @@ package engine
 import (
 	"errors"
 	"runtime"
-	"runtime/debug"
+	"sync/atomic"
 	"unsafe"
 )
 
@@ -11,8 +11,18 @@ var errOutOfMemory = errors.New("out of memory")
 
 var termSize = int64(unsafe.Sizeof(Term(nil)))
 
+// package-local memory limit (defaults to a very large value). Use SetMemoryLimit
+// to configure the limit for tests or embedding scenarios.
+var memoryLimit int64 = 1 << 62
+
+// SetMemoryLimit sets the package-local memory limit and returns the previous
+// value. This avoids mutating the global runtime memory limit.
+func SetMemoryLimit(limit int64) int64 {
+	return atomic.SwapInt64(&memoryLimit, limit)
+}
+
 var memFree = func() int64 {
-	limit := debug.SetMemoryLimit(-1)
+	limit := atomic.LoadInt64(&memoryLimit)
 	var stats runtime.MemStats
 	runtime.ReadMemStats(&stats)
 	return limit - int64(stats.Sys-stats.HeapReleased)

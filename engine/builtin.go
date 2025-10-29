@@ -700,6 +700,8 @@ func assertMerge(vm *VM, t Term, merge func([]clause, []clause) []clause, env *E
 		}
 	}
 
+	// Ensure the procedure entry exists without holding the lock during compile.
+	vm.mu.Lock()
 	if vm.procedures == nil {
 		vm.procedures = map[procedureIndicator]procedure{}
 	}
@@ -708,12 +710,15 @@ func assertMerge(vm *VM, t Term, merge func([]clause, []clause) []clause, env *E
 		p = &userDefined{public: true, dynamic: true}
 		vm.procedures[pi] = p
 	}
+	vm.mu.Unlock()
 
 	added, err := compile(t, env)
 	if err != nil {
 		return err
 	}
 
+	vm.mu.Lock()
+	defer vm.mu.Unlock()
 	u, ok := p.(*userDefined)
 	if !ok || !u.dynamic {
 		return permissionError(operationModify, permissionTypeStaticProcedure, pi.Term(), env)
@@ -1066,6 +1071,7 @@ func CurrentPredicate(vm *VM, pi Term, k Cont, env *Env) *Promise {
 		return Error(typeError(validTypePredicateIndicator, pi, env))
 	}
 
+	vm.mu.RLock()
 	ks := make([]func(context.Context) *Promise, 0, len(vm.procedures))
 	for key, p := range vm.procedures {
 		switch p.(type) {
@@ -1078,6 +1084,7 @@ func CurrentPredicate(vm *VM, pi Term, k Cont, env *Env) *Promise {
 			continue
 		}
 	}
+	vm.mu.RUnlock()
 	return Delay(ks...)
 }
 
@@ -1091,7 +1098,9 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 		return Error(err)
 	}
 
+	vm.mu.RLock()
 	p, ok := vm.procedures[pi]
+	vm.mu.RUnlock()
 	if !ok {
 		return Bool(false)
 	}
@@ -1109,7 +1118,9 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 		ks[i] = func(_ context.Context) *Promise {
 			return Unify(vm, t, raw, func(env *Env) *Promise {
 				j := i - deleted
+				vm.mu.Lock()
 				u.clauses, u.clauses[len(u.clauses)-1] = append(u.clauses[:j], u.clauses[j+1:]...), clause{}
+				vm.mu.Unlock()
 				deleted++
 				return k(env)
 			}, env)
@@ -1142,10 +1153,15 @@ func Abolish(vm *VM, pi Term, k Cont, env *Env) *Promise {
 					return Error(domainError(validDomainNotLessThanZero, arity, env))
 				}
 				key := procedureIndicator{name: name, arity: arity}
-				if u, ok := vm.procedures[key].(*userDefined); !ok || !u.dynamic {
+				vm.mu.RLock()
+				u, ok := vm.procedures[key].(*userDefined)
+				vm.mu.RUnlock()
+				if !ok || !u.dynamic {
 					return Error(permissionError(operationModify, permissionTypeStaticProcedure, key.Term(), env))
 				}
+				vm.mu.Lock()
 				delete(vm.procedures, key)
+				vm.mu.Unlock()
 				return k(env)
 			default:
 				return Error(typeError(validTypeInteger, arity, env))
@@ -1189,7 +1205,9 @@ func SetInput(vm *VM, streamOrAlias Term, k Cont, env *Env) *Promise {
 		return Error(permissionError(operationInput, permissionTypeStream, streamOrAlias, env))
 	}
 
+	vm.mu.Lock()
 	vm.input = s
+	vm.mu.Unlock()
 	return k(env)
 }
 
@@ -1204,7 +1222,9 @@ func SetOutput(vm *VM, streamOrAlias Term, k Cont, env *Env) *Promise {
 		return Error(permissionError(operationOutput, permissionTypeStream, streamOrAlias, env))
 	}
 
+	vm.mu.Lock()
 	vm.output = s
+	vm.mu.Unlock()
 	return k(env)
 }
 
@@ -1982,7 +2002,9 @@ func Clause(vm *VM, head, body Term, k Cont, env *Env) *Promise {
 		return Error(typeError(validTypeCallable, body, env))
 	}
 
+	vm.mu.RLock()
 	p, ok := vm.procedures[pi]
+	vm.mu.RUnlock()
 	if !ok {
 		return Bool(false)
 	}
@@ -2536,14 +2558,17 @@ func CharConversion(vm *VM, inChar, outChar Term, k Cont, env *Env) *Promise {
 				return Error(representationError(flagCharacter, env))
 			}
 
+			vm.mu.Lock()
 			if vm.charConversions == nil {
 				vm.charConversions = map[rune]rune{}
 			}
 			if i[0] == o[0] {
 				delete(vm.charConversions, i[0])
+				vm.mu.Unlock()
 				return k(env)
 			}
 			vm.charConversions[i[0]] = o[0]
+			vm.mu.Unlock()
 			return k(env)
 		default:
 			return Error(representationError(flagCharacter, env))
@@ -2581,8 +2606,11 @@ func CurrentCharConversion(vm *VM, inChar, outChar Term, k Cont, env *Env) *Prom
 
 	if c1, ok := env.Resolve(inChar).(Atom); ok {
 		r := []rune(c1.String())
-		if r, ok := vm.charConversions[r[0]]; ok {
-			return Unify(vm, outChar, Atom(r), k, env)
+		vm.mu.RLock()
+		cr, ok := vm.charConversions[r[0]]
+		vm.mu.RUnlock()
+		if ok {
+			return Unify(vm, outChar, Atom(cr), k, env)
 		}
 		return Unify(vm, outChar, c1, k, env)
 	}
@@ -2591,7 +2619,9 @@ func CurrentCharConversion(vm *VM, inChar, outChar Term, k Cont, env *Env) *Prom
 	ks := make([]func(context.Context) *Promise, 256)
 	for i := 0; i < 256; i++ {
 		r := rune(i)
+		vm.mu.RLock()
 		cr, ok := vm.charConversions[r]
+		vm.mu.RUnlock()
 		if !ok {
 			cr = r
 		}
@@ -2629,9 +2659,13 @@ func SetPrologFlag(vm *VM, flag, value Term, k Cont, env *Env) *Promise {
 		case Variable:
 			return Error(InstantiationError(env))
 		case Atom:
+			// Some flags mutate VM-level fields; protect modifications with the VM lock when needed.
+			vm.mu.Lock()
 			if err := modify(vm, v); err != nil {
+				vm.mu.Unlock()
 				return Error(err)
 			}
+			vm.mu.Unlock()
 			return k(env)
 		default:
 			return Error(domainError(validDomainFlagValue, atomPlus.Apply(flag, value), env))
@@ -2710,6 +2744,7 @@ func CurrentPrologFlag(vm *VM, flag, value Term, k Cont, env *Env) *Promise {
 	}
 
 	pattern := tuple(flag, value)
+	vm.mu.RLock()
 	flags := []Term{
 		tuple(atomBounded, atomTrue),
 		tuple(atomMaxInteger, maxInt),
@@ -2721,6 +2756,7 @@ func CurrentPrologFlag(vm *VM, flag, value Term, k Cont, env *Env) *Promise {
 		tuple(atomUnknown, NewAtom(vm.unknown.String())),
 		tuple(atomDoubleQuotes, NewAtom(vm.doubleQuotes.String())),
 	}
+	vm.mu.RUnlock()
 	ks := make([]func(context.Context) *Promise, len(flags))
 	for i := range flags {
 		f := flags[i]
@@ -2749,7 +2785,10 @@ func ExpandTerm(vm *VM, term1, term2 Term, k Cont, env *Env) *Promise {
 }
 
 func expand(vm *VM, term Term, env *Env) (Term, error) {
-	if _, ok := vm.procedures[procedureIndicator{name: atomTermExpansion, arity: 2}]; ok {
+	vm.mu.RLock()
+	_, ok := vm.procedures[procedureIndicator{name: atomTermExpansion, arity: 2}]
+	vm.mu.RUnlock()
+	if ok {
 		var ret Term
 		v := NewVariable()
 		ok, err := Call(vm, atomTermExpansion.Apply(term, v), func(env *Env) *Promise {

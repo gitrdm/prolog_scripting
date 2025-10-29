@@ -27,6 +27,9 @@ func (vm *VM) Compile(ctx context.Context, s string, args ...interface{}) error 
 		return err
 	}
 
+	// Install compiled clauses to the VM under lock to avoid races with other
+	// concurrent modifications (e.g., Register*, Assertz, Retract).
+	vm.mu.Lock()
 	if vm.procedures == nil {
 		vm.procedures = map[procedureIndicator]procedure{}
 	}
@@ -38,6 +41,7 @@ func (vm *VM) Compile(ctx context.Context, s string, args ...interface{}) error 
 
 		vm.procedures[pi] = u
 	}
+	vm.mu.Unlock()
 
 	for _, g := range t.goals {
 		ok, err := Call(vm, g, Success, nil).Force(ctx)
@@ -186,18 +190,26 @@ func (vm *VM) ensureLoaded(ctx context.Context, file Term, env *Env) error {
 		return err
 	}
 
+	// Mark file as loading under lock to avoid races with concurrent Consult/ensureLoaded.
+	vm.mu.Lock()
 	if vm.loaded == nil {
 		vm.loaded = map[string]struct{}{}
 	}
 	if _, ok := vm.loaded[f]; ok {
+		vm.mu.Unlock()
 		return nil
 	}
 
 	// It's too early to say it's fully loaded. Yet this avoids recursive load of the same file.
 	vm.loaded[f] = struct{}{}
+	vm.mu.Unlock()
 
 	if err := vm.Compile(ctx, string(b)); err != nil {
+		// Remove the 'loading' mark under the VM lock to avoid races with
+		// concurrent calls to ensureLoaded/Consult.
+		vm.mu.Lock()
 		delete(vm.loaded, f) // It wasn't fully loaded after all.
+		vm.mu.Unlock()
 		return err
 	}
 
