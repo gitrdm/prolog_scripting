@@ -26,21 +26,36 @@ type retractStats struct {
 	casFail     uint64 // number of failed CAS attempts
 }
 
-var debugRetractStats *retractStats
+var debugRetractStats atomic.Pointer[retractStats]
 
 // syncCompactOnRetract controls whether compaction is performed synchronously
 // inside Retract/assert paths. Useful for tests that require deterministic
 // immediate compaction. It is initialized from the environment variable
 // PROLOG_SYNC_COMPACT_ON_RETRACT but tests may toggle it via the
 // setSyncCompactOnRetractForTest helper.
-var syncCompactOnRetract bool
+// syncCompactOnRetract controls whether compaction is performed synchronously
+// inside Retract/assert paths. Useful for tests that require deterministic
+// immediate compaction. It is initialized from the environment variable
+// PROLOG_SYNC_COMPACT_ON_RETRACT but tests may toggle it via the
+// setSyncCompactOnRetractForTest helper.
+var syncCompactOnRetract uint32
 
 // test-only helper to toggle synchronous compaction (used by benchmarks/tests)
-func setSyncCompactOnRetractForTest(v bool) { syncCompactOnRetract = v }
+func setSyncCompactOnRetractForTest(v bool) {
+	if v {
+		atomic.StoreUint32(&syncCompactOnRetract, 1)
+	} else {
+		atomic.StoreUint32(&syncCompactOnRetract, 0)
+	}
+}
 
 func init() {
 	v := os.Getenv("PROLOG_SYNC_COMPACT_ON_RETRACT")
-	syncCompactOnRetract = v == "1" || strings.ToLower(v) == "true"
+	if v == "1" || strings.ToLower(v) == "true" {
+		atomic.StoreUint32(&syncCompactOnRetract, 1)
+	} else {
+		atomic.StoreUint32(&syncCompactOnRetract, 0)
+	}
 }
 
 // compaction background worker fields. We bound the queue to avoid unbounded
@@ -845,7 +860,7 @@ func assertMerge(vm *VM, t Term, merge func([]*clause, []*clause) []*clause, env
 	}
 	// heuristic: compact if more than 32 deleted or more than 25% deleted
 	if deleted > 0 && (deleted > 32 || deleted*4 > len(u.getClauses())) {
-		if syncCompactOnRetract {
+		if atomic.LoadUint32(&syncCompactOnRetract) != 0 {
 			compactClauses(u)
 		} else {
 			if !enqueueCompaction(vm, u) {
@@ -1231,9 +1246,8 @@ func CurrentPredicate(vm *VM, pi Term, k Cont, env *Env) *Promise {
 		return Error(typeError(validTypePredicateIndicator, pi, env))
 	}
 
-	vm.mu.RLock()
-	ks := make([]func(context.Context) *Promise, 0, len(vm.procedures))
-	for key, p := range vm.procedures {
+	ks := make([]func(context.Context) *Promise, 0)
+	for key, p := range vm.ProceduresCopy() {
 		switch p.(type) {
 		case *userDefined:
 			c := key.Term()
@@ -1244,7 +1258,6 @@ func CurrentPredicate(vm *VM, pi Term, k Cont, env *Env) *Promise {
 			continue
 		}
 	}
-	vm.mu.RUnlock()
 	return Delay(ks...)
 }
 
@@ -1258,9 +1271,7 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 		return Error(err)
 	}
 
-	vm.mu.RLock()
-	p, ok := vm.procedures[pi]
-	vm.mu.RUnlock()
+	p, ok := vm.LookupProcedure(pi)
 	if !ok {
 		return Bool(false)
 	}
@@ -1288,8 +1299,8 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 
 		ks[i] = func(_ context.Context) *Promise {
 			return Unify(vm, t, raw, func(env *Env) *Promise {
-				if debugRetractStats != nil {
-					atomic.AddUint64(&debugRetractStats.attempts, 1)
+				if p := debugRetractStats.Load(); p != nil {
+					atomic.AddUint64(&p.attempts, 1)
 				}
 				// Attempt to claim the specific clause this alternative corresponds to.
 				idx := i
@@ -1297,16 +1308,16 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 				if atomic.LoadUint32(&snap[idx].deleted) != 0 {
 					return Bool(false)
 				}
-				if debugRetractStats != nil {
-					atomic.AddUint64(&debugRetractStats.comparisons, 1)
+				if p := debugRetractStats.Load(); p != nil {
+					atomic.AddUint64(&p.comparisons, 1)
 				}
 				if bytecodeEqual(snap[idx].bytecode, capturedBC) {
 					claimed := atomic.CompareAndSwapUint32(&snap[idx].deleted, 0, 1)
-					if debugRetractStats != nil {
+					if p := debugRetractStats.Load(); p != nil {
 						if claimed {
-							atomic.AddUint64(&debugRetractStats.casSuccess, 1)
+							atomic.AddUint64(&p.casSuccess, 1)
 						} else {
-							atomic.AddUint64(&debugRetractStats.casFail, 1)
+							atomic.AddUint64(&p.casFail, 1)
 						}
 					}
 					if claimed {
@@ -1331,7 +1342,7 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 							l := len(u.getClauses())
 							vm.mu.RUnlock()
 							if deleted > 32 || int(deleted)*4 > l {
-								if syncCompactOnRetract {
+								if atomic.LoadUint32(&syncCompactOnRetract) != 0 {
 									vm.mu.Lock()
 									compactClauses(u)
 									vm.mu.Unlock()
@@ -1384,15 +1395,12 @@ func Abolish(vm *VM, pi Term, k Cont, env *Env) *Promise {
 					return Error(domainError(validDomainNotLessThanZero, arity, env))
 				}
 				key := procedureIndicator{name: name, arity: arity}
-				vm.mu.RLock()
-				u, ok := vm.procedures[key].(*userDefined)
-				vm.mu.RUnlock()
+				p, ok := vm.LookupProcedure(key)
+				u, ok := p.(*userDefined)
 				if !ok || !u.dynamic {
 					return Error(permissionError(operationModify, permissionTypeStaticProcedure, key.Term(), env))
 				}
-				vm.mu.Lock()
-				delete(vm.procedures, key)
-				vm.mu.Unlock()
+				vm.RemoveProcedure(key)
 				return k(env)
 			default:
 				return Error(typeError(validTypeInteger, arity, env))
@@ -2248,9 +2256,7 @@ func Clause(vm *VM, head, body Term, k Cont, env *Env) *Promise {
 		return Error(typeError(validTypeCallable, body, env))
 	}
 
-	vm.mu.RLock()
-	p, ok := vm.procedures[pi]
-	vm.mu.RUnlock()
+	p, ok := vm.LookupProcedure(pi)
 	if !ok {
 		return Bool(false)
 	}
@@ -2695,10 +2701,13 @@ func numberCodesWrite(vm *VM, num, codes Term, k Cont, env *Env) *Promise {
 
 // StreamProperty succeeds iff the stream represented by stream has the stream property.
 func StreamProperty(vm *VM, stream, property Term, k Cont, env *Env) *Promise {
-	streams := make([]*Stream, 0, len(vm.streams.elems))
+	// snapshot the streams registry to avoid unsynchronized access to
+	// vm.streams.elems. snapshot() acquires a read-lock and returns a copy
+	// of the slice so we can iterate without holding vm.streams.mu.
+	streams := make([]*Stream, 0, len(vm.streams.snapshot()))
 	switch s := env.Resolve(stream).(type) {
 	case Variable:
-		for _, v := range vm.streams.elems {
+		for _, v := range vm.streams.snapshot() {
 			streams = append(streams, v)
 		}
 	case *Stream:
@@ -3036,9 +3045,7 @@ func ExpandTerm(vm *VM, term1, term2 Term, k Cont, env *Env) *Promise {
 }
 
 func expand(vm *VM, term Term, env *Env) (Term, error) {
-	vm.mu.RLock()
-	_, ok := vm.procedures[procedureIndicator{name: atomTermExpansion, arity: 2}]
-	vm.mu.RUnlock()
+	_, ok := vm.LookupProcedure(procedureIndicator{name: atomTermExpansion, arity: 2})
 	if ok {
 		var ret Term
 		v := NewVariable()

@@ -539,6 +539,53 @@ func (vm *VM) Clone() *VM {
 	return n
 }
 
+// LookupProcedure returns the procedure registered for pi. It acquires
+// vm.mu.RLock() internally so callers don't need to hold the VM lock for
+// simple lookups.
+func (vm *VM) LookupProcedure(pi procedureIndicator) (procedure, bool) {
+	vm.mu.RLock()
+	p, ok := vm.procedures[pi]
+	vm.mu.RUnlock()
+	return p, ok
+}
+
+// InstallProcedure installs p under the given procedure indicator. The
+// method acquires vm.mu.Lock() internally and ensures the map is allocated.
+func (vm *VM) InstallProcedure(pi procedureIndicator, p procedure) {
+	vm.mu.Lock()
+	if vm.procedures == nil {
+		vm.procedures = map[procedureIndicator]procedure{}
+	}
+	vm.procedures[pi] = p
+	vm.mu.Unlock()
+}
+
+// RemoveProcedure deletes the procedure entry for pi. It acquires the write
+// lock internally.
+func (vm *VM) RemoveProcedure(pi procedureIndicator) {
+	vm.mu.Lock()
+	if vm.procedures != nil {
+		delete(vm.procedures, pi)
+	}
+	vm.mu.Unlock()
+}
+
+// ProceduresCopy returns a shallow copy of the procedures map. The copy can
+// be safely iterated without holding vm.mu.
+func (vm *VM) ProceduresCopy() map[procedureIndicator]procedure {
+	vm.mu.RLock()
+	if vm.procedures == nil {
+		vm.mu.RUnlock()
+		return nil
+	}
+	cp := make(map[procedureIndicator]procedure, len(vm.procedures))
+	for k, v := range vm.procedures {
+		cp[k] = v
+	}
+	vm.mu.RUnlock()
+	return cp
+}
+
 // bytecodeEqual compares two bytecode sequences for equality. We use a deep
 // comparison of the operand to keep the check simple and robust across
 // different operand types (Term, procedureIndicator, Integer, etc.).

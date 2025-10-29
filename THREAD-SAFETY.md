@@ -245,3 +245,48 @@ Notes:
 - The worker uses only exported APIs (Assertz/Retract). It intentionally does not inspect unexported internals; use `go test -race ./engine` and the in-repo `engine/stress_test.go` to run a test harness under the race detector.
 - Use the standalone worker when you want to stress background compaction and observe background activity on your local machine. On CI you may prefer deterministic `go test -race ./...` runs which exercise the code paths without starting the background worker.
 
+ 
+## Audit results (automatic scan) — 2025-10-29
+
+I ran a repo-wide scan for package-level `var` declarations and direct `vm.` field accesses. Below are the high-confidence hotspots I found, with a short recommendation for each. This is intended as a prioritized audit so we can pick low-risk fixes first.
+
+- Package-level mutable globals (review / protect / document):
+  - `engine/builtin.go`
+    - `var debugRetractStats *retractStats` — converted to `atomic.Pointer[retractStats]` in this branch. Recommendation: keep as atomic pointer (done).
+    - `var syncCompactOnRetract bool` — converted to atomic `uint32` in this branch. Recommendation: keep atomic (done).
+    - `var operatorSpecifiers = map[Atom]operatorSpecifier{...}` — constant initializer; OK if not mutated at runtime. If tests mutate it, protect with `vm.mu` or make copies.
+    - `var openFile = os.OpenFile`, `var osExit = func(code int) { ... }` — test-injection hooks. Document that tests must set these only when single-threaded or guard them with a package-level mutex if concurrent mutation is needed.
+
+  - `engine/malloc.go`
+    - `var memoryLimit int64`, `var memFree = func() int64 { ... }` — `SetMemoryLimit` uses `atomic.SwapInt64`, `memFree` loads atomically. This is safe; avoid calling global runtime setters. (OK)
+
+  - `engine/variable.go`
+    - `var varCounter int64` — uses `atomic.AddInt64` for `NewVariable()` (OK).
+
+  - Other package-level `var` occurrences (mostly immutable maps/constants or test-only):
+    - `engine/number.go` constants map, `engine/term.go` defaultWriteOptions, `engine/promise.go` dummyCutParent, `solutions.go` ErrClosed, etc. Recommendation: mark immutable ones as const/var but do not mutate at runtime.
+
+- VM field access hotspots (places to inspect and ensure proper locking):
+  - `engine/vm.go`: `procedures`, `loaded`, `charConversions`, `operators`, `streams`, `input`, `output` — these are the primary mutable VM fields. Most production code already uses `vm.mu` (RLock/Lock) — good. Verify any direct reads/writes without `vm.mu` are test-only or guarded.
+  - Tests and benches that set/inspect `vm.procedures` directly:
+    - `engine/builtin_concurrency_test.go` and `engine/text_test.go` create or mutate `vm.procedures` directly for test fixtures. That's fine for in-package tests but means the background compaction worker must remain disabled for `go test` (we already do this).
+    - `engine/retract_bench_test.go` and some bench tests explicitly lock `vm.mu` when mutating `procedures` — these are correct.
+
+- Streams and I/O:
+  - `engine/stream.go` contains the `streams` registry and a per-`Stream` struct. I added `streams.snapshot()` and there are per-stream `s.mu` locks. Recommendation: keep `streams.mu` as `sync.RWMutex` and always snapshot for iteration; ensure `Close()` removes from registry before acquiring `s.mu` (this pattern is already present).
+
+- Compaction worker lifecycle:
+  - `engine/builtin.go` holds `compactionQueue`, `compactionMu`, `compactionStopped`. These are protected by `compactionMu` for start/stop/enqueue operations. This is acceptable, but please review shutdown paths in long-running embedding scenarios; consider an atomic flag + close semantics for graceful shutdown.
+
+- Remaining quick wins I recommend we land next:
+  1. Convert any remaining test-only package-level mutation helpers to use atomic or a test-only mutex (low-risk).
+ 2. Produce an explicit list of files/tests which mutate `vm.procedures` without acquiring `vm.mu` (I found mostly tests). If any production code does this, wrap with `vm.mu.RLock()`/`Unlock()` or an accessor API.
+ 3. Add a CI job that runs `go test ./...` and a separate `go test -race ./...` job (budgeted). This will catch regressions early.
+
+## Audit summary
+
+- Current status: the branch has made significant progress (atomic clause publication, per-clause tombstones, streams snapshot, atomicized debug toggles). Unit tests and `go test -race ./...` pass locally.
+- Remaining work: finish a repo-wide manual review of the package-level `var` list and any non-test direct accesses to `vm` fields; eliminate or guard them as appropriate.
+
+If you want I'll now produce a precise file/line report for all package-level `var` declarations and all `vm.procedures` occurrences (including context lines) so we can triage them into small PRs. Say "full report" and I'll generate those files and update the todo list accordingly.
+

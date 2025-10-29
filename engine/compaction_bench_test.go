@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 )
 
@@ -11,9 +12,9 @@ import (
 // compaction by toggling the package test helper.
 func BenchmarkForceCompaction(b *testing.B) {
 	// enable synchronous compaction for deterministic measurement
-	old := syncCompactOnRetract
+	old := atomic.LoadUint32(&syncCompactOnRetract)
 	setSyncCompactOnRetractForTest(true)
-	defer setSyncCompactOnRetractForTest(old)
+	defer atomic.StoreUint32(&syncCompactOnRetract, old)
 
 	vm := &VM{}
 	// create a predicate with many clauses so compaction will be triggered

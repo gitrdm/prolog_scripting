@@ -589,6 +589,17 @@ func (ss *streams) lookup(a Atom) (*Stream, bool) {
 	return s, ok
 }
 
+// snapshot returns a copy of the current streams slice. The caller may iterate
+// over the returned slice without holding any locks. This avoids exposing the
+// internal slice (ss.elems) which would otherwise allow unsynchronized access.
+func (ss *streams) snapshot() []*Stream {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	out := make([]*Stream, len(ss.elems))
+	copy(out, ss.elems)
+	return out
+}
+
 // bufReader is a wrapper around *bufio.Reader.
 // *bufio.Reader doesn't tell us if the underlying io.Reader returned an error.
 // We need to know this to determine end_of_stream.

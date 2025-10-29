@@ -73,7 +73,7 @@ func TestConcurrentRetract(t *testing.T) {
 	// variable PROLOG_DEBUG_RETRACT=1 is set. This keeps diagnostics off by
 	// default to avoid noisy logs in normal runs.
 	if os.Getenv("PROLOG_DEBUG_RETRACT") == "1" {
-		debugRetractStats = &retractStats{}
+		debugRetractStats.Store(&retractStats{})
 	}
 
 	var wg sync.WaitGroup
@@ -101,15 +101,15 @@ func TestConcurrentRetract(t *testing.T) {
 	wg.Wait()
 
 	// Log diagnostic counters collected during the test.
-	if debugRetractStats != nil {
+	if p := debugRetractStats.Load(); p != nil {
 		t.Logf("Retract diagnostics: attempts=%d comparisons=%d casSuccess=%d casFail=%d",
-			atomic.LoadUint64(&debugRetractStats.attempts),
-			atomic.LoadUint64(&debugRetractStats.comparisons),
-			atomic.LoadUint64(&debugRetractStats.casSuccess),
-			atomic.LoadUint64(&debugRetractStats.casFail),
+			atomic.LoadUint64(&p.attempts),
+			atomic.LoadUint64(&p.comparisons),
+			atomic.LoadUint64(&p.casSuccess),
+			atomic.LoadUint64(&p.casFail),
 		)
 		// disable after use
-		debugRetractStats = nil
+		debugRetractStats.Store(nil)
 	}
 
 	// successes should equal the number of initial clauses (or less if attempts were
