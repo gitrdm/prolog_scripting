@@ -124,6 +124,24 @@ If you'd like, I can implement that small change now as the first code patch, ru
 - [ ] I will implement the small `streams` mutex change and run the test-suite (fast, low-risk). — (recommended next action)
 - [ ] Or: if you prefer the documentation-first route, I will mark `THREAD-SAFETY.md` as the design proposal and we can review it before coding.
 
+## Test helpers and semantic comparators (test guidance)
+
+After the `clauses` storage was refactored to an atomic-swap model (`clausesHolder` + `getClauses`/`setClauses` on `userDefined`), some tests that compared expected `*userDefined` values directly started failing intermittently. Those failures were not functional bugs but false negatives caused by comparing internal atomic pointer addresses and other implementation details that can change across allocations.
+
+To make tests robust and implementation-agnostic, the test-suite now includes small helpers:
+
+- `udWith(u *userDefined, cs clauses) *userDefined` (in `engine/text_test.go`) — constructs a `*userDefined` and publishes clauses using `u.setClauses(...)` so expected values don't capture atomic internals.
+- `udWithClauses(u *userDefined, cs []*clause) *userDefined` (in `engine/test_helpers_test.go`) — same purpose, centralized for reuse.
+- `proceduresEqual(exp, act map[procedureIndicator]procedure) bool` and `procedureEqual(exp, act procedure) bool` (in `engine/test_helpers_test.go`) — semantic comparators that compare the public fields and clause contents (pi, raw, bytecode, vars) while intentionally ignoring atomic internals (atomic.Pointer addresses, tombstone counters, etc.).
+
+Guidelines for contributors:
+
+- Do not write tests that use `assert.Equal(t, expected, vm.procedures)` or `assert.Equal(t, expectedUD, vm.procedures[pi])` when `expected` or `expectedUD` was constructed as a struct literal containing `clauses:` or direct `u.clauses` fields. Instead, use `proceduresEqual` / `procedureEqual` or construct expected values via `udWith` / `udWithClauses` so the expectations reflect semantic behavior only.
+- Keep these helpers centralized in `engine/test_helpers_test.go` to avoid duplication and accidental pointer-sensitive comparisons.
+- If a test needs to assert low-level atomic behavior (for example testing compaction internals), make that explicit and isolate it in a targeted test; prefer deterministic modes (e.g., `PROLOG_SYNC_COMPACT_ON_RETRACT`) so the test can observe and assert internal state deterministically.
+
+This approach makes tests resilient to future internal changes (different allocation patterns, atomic implementation tweaks) while preserving full semantic verification of interpreter behavior.
+
 ---
 
 Created on: 2025-10-29
@@ -201,4 +219,29 @@ Phase 4 — Optional performance improvements
 ## Closing notes
 
 I implemented the low-risk changes and concurrency tests already in this branch. The next best step is to either finalize the refactor (if you want the shared-VM mode) or document the per-request pattern as the supported approach and add the pool helper. I can do either next — tell me which and I'll proceed.
+
+## Stress test: standalone worker (background compaction)
+
+To exercise the background compaction worker (which is intentionally disabled when running inside the `go test` binary), a small standalone stress worker binary has been added at `cmd/stress_worker`. Run this binary (or `go run`) to exercise concurrent Assertz/Retract workloads while the background compaction worker is active.
+
+How to run locally:
+
+```bash
+# build the worker
+go build ./cmd/stress_worker
+
+# run with defaults
+./stress_worker
+
+# run with smaller / larger settings
+./stress_worker -goroutines 8 -iterations 500 -initial 256
+
+# or via go run
+go run ./cmd/stress_worker -goroutines 16 -iterations 2000 -initial 512
+```
+
+Notes:
+- Running the standalone worker starts the background compaction worker because the binary name does not end with `.test`. This forces compaction tasks to be processed by a background goroutine, which is the production behavior the unit tests avoid for determinism.
+- The worker uses only exported APIs (Assertz/Retract). It intentionally does not inspect unexported internals; use `go test -race ./engine` and the in-repo `engine/stress_test.go` to run a test harness under the race detector.
+- Use the standalone worker when you want to stress background compaction and observe background activity on your local machine. On CI you may prefer deterministic `go test -race ./...` runs which exercise the code paths without starting the background worker.
 
