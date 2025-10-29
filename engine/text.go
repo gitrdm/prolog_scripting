@@ -35,7 +35,9 @@ func (vm *VM) Compile(ctx context.Context, s string, args ...interface{}) error 
 	}
 	for pi, u := range t.clauses {
 		if existing, ok := vm.procedures[pi].(*userDefined); ok && existing.multifile && u.multifile {
-			existing.clauses = append(existing.clauses, u.clauses...)
+			cs := existing.getClauses()
+			cs = append(cs, u.getClauses()...)
+			existing.setClauses(cs)
 			continue
 		}
 
@@ -291,10 +293,12 @@ func (t *text) flush() error {
 		u = &userDefined{}
 		t.clauses[pi] = u
 	}
-	if len(u.clauses) > 0 && !u.discontiguous {
+	if len(u.getClauses()) > 0 && !u.discontiguous {
 		return &discontiguousError{pi: pi}
 	}
-	u.clauses = append(u.clauses, t.buf...)
+	cs := u.getClauses()
+	cs = append(cs, t.buf...)
+	u.setClauses(cs)
 	t.buf = t.buf[:0]
 	return nil
 }

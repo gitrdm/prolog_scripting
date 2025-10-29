@@ -22,6 +22,12 @@ func mustOpen(fs fs.FS, name string) fs.File {
 	return f
 }
 
+// test helper: construct a userDefined pointer and set its clauses
+func udWith(u *userDefined, cs clauses) *userDefined {
+	u.setClauses(cs)
+	return u
+}
+
 func TestVM_Compile(t *testing.T) {
 	tests := []struct {
 		title  string
@@ -33,8 +39,9 @@ func TestVM_Compile(t *testing.T) {
 		{title: "shebang", text: `#!/foo/bar
 foo(a).
 `, result: map[procedureIndicator]procedure{
-			{name: NewAtom("foo"), arity: 1}: &userDefined{
-				clauses: clauses{
+			{name: NewAtom("foo"), arity: 1}: func() *userDefined {
+				ud := &userDefined{}
+				ud.setClauses(clauses{
 					{
 						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
 						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}},
@@ -43,30 +50,29 @@ foo(a).
 							{opcode: opExit},
 						},
 					},
-				},
-			},
+				})
+				return ud
+			}(),
 		}},
 		{title: "shebang: no following lines", text: `#!/foo/bar`, result: map[procedureIndicator]procedure{
-			{name: NewAtom("foo"), arity: 1}: &userDefined{
-				multifile: true,
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("c")},
-							{opcode: opExit},
-						},
+			{name: NewAtom("foo"), arity: 1}: udWith(&userDefined{multifile: true}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("c")},
+						{opcode: opExit},
 					},
 				},
-			},
+			}),
 		}},
 		{title: "facts", text: `
 foo(a).
 foo(b).
 `, result: map[procedureIndicator]procedure{
-			{name: NewAtom("foo"), arity: 1}: &userDefined{
-				clauses: clauses{
+			{name: NewAtom("foo"), arity: 1}: func() *userDefined {
+				ud := &userDefined{}
+				ud.setClauses(clauses{
 					{
 						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
 						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}},
@@ -83,154 +89,141 @@ foo(b).
 							{opcode: opExit},
 						},
 					},
-				},
-			},
+				})
+				return ud
+			}(),
 		}},
 		{title: "rules", text: `
 bar :- true.
 bar(X, "abc", [a, b], [a, b|Y], f(a)) :- X, !, foo(X, "abc", [a, b], [a, b|Y], f(a)).
 `, result: map[procedureIndicator]procedure{
-			{name: NewAtom("foo"), arity: 1}: &userDefined{
-				multifile: true,
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("c")},
-							{opcode: opExit},
-						},
+			{name: NewAtom("foo"), arity: 1}: udWith(&userDefined{multifile: true}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("c")},
+						{opcode: opExit},
 					},
 				},
-			},
-			{name: NewAtom("bar"), arity: 0}: &userDefined{
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("bar"), arity: 0},
-						raw: atomIf.Apply(NewAtom("bar"), atomTrue),
-						bytecode: bytecode{
-							{opcode: opEnter},
-							{opcode: opCall, operand: procedureIndicator{name: atomTrue, arity: 0}},
-							{opcode: opExit},
-						},
+			}),
+			{name: NewAtom("bar"), arity: 0}: udWith(&userDefined{}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("bar"), arity: 0},
+					raw: atomIf.Apply(NewAtom("bar"), atomTrue),
+					bytecode: bytecode{
+						{opcode: opEnter},
+						{opcode: opCall, operand: procedureIndicator{name: atomTrue, arity: 0}},
+						{opcode: opExit},
 					},
 				},
-			},
-			{name: NewAtom("bar"), arity: 5}: &userDefined{
-				clauses: clauses{
-					{
-						pi: procedureIndicator{name: NewAtom("bar"), arity: 5},
-						raw: atomIf.Apply(
-							NewAtom("bar").Apply(lastVariable()+1, charList("abc"), List(NewAtom("a"), NewAtom("b")), PartialList(lastVariable()+2, NewAtom("a"), NewAtom("b")), NewAtom("f").Apply(NewAtom("a"))),
-							seq(atomComma,
-								lastVariable()+1,
-								atomCut,
-								NewAtom("foo").Apply(lastVariable()+1, charList("abc"), List(NewAtom("a"), NewAtom("b")), PartialList(lastVariable()+2, NewAtom("a"), NewAtom("b")), NewAtom("f").Apply(NewAtom("a"))),
-							),
+			}),
+			{name: NewAtom("bar"), arity: 5}: udWith(&userDefined{}, clauses{
+				{
+					pi: procedureIndicator{name: NewAtom("bar"), arity: 5},
+					raw: atomIf.Apply(
+						NewAtom("bar").Apply(lastVariable()+1, charList("abc"), List(NewAtom("a"), NewAtom("b")), PartialList(lastVariable()+2, NewAtom("a"), NewAtom("b")), NewAtom("f").Apply(NewAtom("a"))),
+						seq(atomComma,
+							lastVariable()+1,
+							atomCut,
+							NewAtom("foo").Apply(lastVariable()+1, charList("abc"), List(NewAtom("a"), NewAtom("b")), PartialList(lastVariable()+2, NewAtom("a"), NewAtom("b")), NewAtom("f").Apply(NewAtom("a"))),
 						),
-						vars: []Variable{lastVariable() + 1, lastVariable() + 2},
-						bytecode: bytecode{
-							{opcode: opGetVar, operand: Integer(0)},
-							{opcode: opGetConst, operand: charList("abc")},
-							{opcode: opGetList, operand: Integer(2)},
-							{opcode: opGetConst, operand: NewAtom("a")},
-							{opcode: opGetConst, operand: NewAtom("b")},
-							{opcode: opPop},
-							{opcode: opGetPartial, operand: Integer(2)},
-							{opcode: opGetVar, operand: Integer(1)},
-							{opcode: opGetConst, operand: NewAtom("a")},
-							{opcode: opGetConst, operand: NewAtom("b")},
-							{opcode: opPop},
-							{opcode: opGetFunctor, operand: procedureIndicator{name: NewAtom("f"), arity: 1}},
-							{opcode: opGetConst, operand: NewAtom("a")},
-							{opcode: opPop},
-							{opcode: opEnter},
-							{opcode: opPutVar, operand: Integer(0)},
-							{opcode: opCall, operand: procedureIndicator{name: atomCall, arity: 1}},
-							{opcode: opCut},
-							{opcode: opPutVar, operand: Integer(0)},
-							{opcode: opPutConst, operand: charList("abc")},
-							{opcode: opPutList, operand: Integer(2)},
-							{opcode: opPutConst, operand: NewAtom("a")},
-							{opcode: opPutConst, operand: NewAtom("b")},
-							{opcode: opPop},
-							{opcode: opPutPartial, operand: Integer(2)},
-							{opcode: opPutVar, operand: Integer(1)},
-							{opcode: opPutConst, operand: NewAtom("a")},
-							{opcode: opPutConst, operand: NewAtom("b")},
-							{opcode: opPop},
-							{opcode: opPutFunctor, operand: procedureIndicator{name: NewAtom("f"), arity: 1}},
-							{opcode: opPutConst, operand: NewAtom("a")},
-							{opcode: opPop},
-							{opcode: opCall, operand: procedureIndicator{name: NewAtom("foo"), arity: 5}},
-							{opcode: opExit},
-						},
+					),
+					vars: []Variable{lastVariable() + 1, lastVariable() + 2},
+					bytecode: bytecode{
+						{opcode: opGetVar, operand: Integer(0)},
+						{opcode: opGetConst, operand: charList("abc")},
+						{opcode: opGetList, operand: Integer(2)},
+						{opcode: opGetConst, operand: NewAtom("a")},
+						{opcode: opGetConst, operand: NewAtom("b")},
+						{opcode: opPop},
+						{opcode: opGetPartial, operand: Integer(2)},
+						{opcode: opGetVar, operand: Integer(1)},
+						{opcode: opGetConst, operand: NewAtom("a")},
+						{opcode: opGetConst, operand: NewAtom("b")},
+						{opcode: opPop},
+						{opcode: opGetFunctor, operand: procedureIndicator{name: NewAtom("f"), arity: 1}},
+						{opcode: opGetConst, operand: NewAtom("a")},
+						{opcode: opPop},
+						{opcode: opEnter},
+						{opcode: opPutVar, operand: Integer(0)},
+						{opcode: opCall, operand: procedureIndicator{name: atomCall, arity: 1}},
+						{opcode: opCut},
+						{opcode: opPutVar, operand: Integer(0)},
+						{opcode: opPutConst, operand: charList("abc")},
+						{opcode: opPutList, operand: Integer(2)},
+						{opcode: opPutConst, operand: NewAtom("a")},
+						{opcode: opPutConst, operand: NewAtom("b")},
+						{opcode: opPop},
+						{opcode: opPutPartial, operand: Integer(2)},
+						{opcode: opPutVar, operand: Integer(1)},
+						{opcode: opPutConst, operand: NewAtom("a")},
+						{opcode: opPutConst, operand: NewAtom("b")},
+						{opcode: opPop},
+						{opcode: opPutFunctor, operand: procedureIndicator{name: NewAtom("f"), arity: 1}},
+						{opcode: opPutConst, operand: NewAtom("a")},
+						{opcode: opPop},
+						{opcode: opCall, operand: procedureIndicator{name: NewAtom("foo"), arity: 5}},
+						{opcode: opExit},
 					},
 				},
-			},
+			}),
 		}},
 		{title: "dynamic", text: `
 :- dynamic(foo/1).
 foo(a).
 foo(b).
 `, result: map[procedureIndicator]procedure{
-			{name: NewAtom("foo"), arity: 1}: &userDefined{
-				public:  true,
-				dynamic: true,
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("a")},
-							{opcode: opExit},
-						},
-					},
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("b")},
-							{opcode: opExit},
-						},
+			{name: NewAtom("foo"), arity: 1}: udWith(&userDefined{public: true, dynamic: true}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("a")},
+						{opcode: opExit},
 					},
 				},
-			},
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("b")},
+						{opcode: opExit},
+					},
+				},
+			}),
 		}},
 		{title: "multifile", text: `
 :- multifile(foo/1).
 foo(a).
 foo(b).
 `, result: map[procedureIndicator]procedure{
-			{name: NewAtom("foo"), arity: 1}: &userDefined{
-				multifile: true,
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("c")},
-							{opcode: opExit},
-						},
-					},
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("a")},
-							{opcode: opExit},
-						},
-					},
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("b")},
-							{opcode: opExit},
-						},
+			{name: NewAtom("foo"), arity: 1}: udWith(&userDefined{multifile: true}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("c")},
+						{opcode: opExit},
 					},
 				},
-			},
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("a")},
+						{opcode: opExit},
+					},
+				},
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("b")},
+						{opcode: opExit},
+					},
+				},
+			}),
 		}},
 		{title: "discontiguous", text: `
 :- discontiguous(foo/1).
@@ -238,129 +231,108 @@ foo(a).
 bar(a).
 foo(b).
 `, result: map[procedureIndicator]procedure{
-			{name: NewAtom("foo"), arity: 1}: &userDefined{
-				discontiguous: true,
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("a")},
-							{opcode: opExit},
-						},
-					},
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("b")},
-							{opcode: opExit},
-						},
+			{name: NewAtom("foo"), arity: 1}: udWith(&userDefined{discontiguous: true}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("a")},
+						{opcode: opExit},
 					},
 				},
-			},
-			{name: NewAtom("bar"), arity: 1}: &userDefined{
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("bar"), arity: 1},
-						raw: &compound{functor: NewAtom("bar"), args: []Term{NewAtom("a")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("a")},
-							{opcode: opExit},
-						},
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("b")},
+						{opcode: opExit},
 					},
 				},
-			},
+			}),
+			{name: NewAtom("bar"), arity: 1}: udWith(&userDefined{}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("bar"), arity: 1},
+					raw: &compound{functor: NewAtom("bar"), args: []Term{NewAtom("a")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("a")},
+						{opcode: opExit},
+					},
+				},
+			}),
 		}},
 		{title: "include", text: `
 :- include('testdata/foo').
 `, result: map[procedureIndicator]procedure{
-			{name: NewAtom("foo"), arity: 0}: &userDefined{
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 0},
-						raw: NewAtom("foo"),
-						bytecode: bytecode{
-							{opcode: opExit},
-						},
+			{name: NewAtom("foo"), arity: 0}: udWith(&userDefined{}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 0},
+					raw: NewAtom("foo"),
+					bytecode: bytecode{
+						{opcode: opExit},
 					},
 				},
-			},
-			{name: NewAtom("foo"), arity: 1}: &userDefined{
-				multifile: true,
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("c")},
-							{opcode: opExit},
-						},
+			}),
+			{name: NewAtom("foo"), arity: 1}: udWith(&userDefined{multifile: true}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("c")},
+						{opcode: opExit},
 					},
 				},
-			},
+			}),
 		}},
 		{title: "ensure_loaded", text: `
 :- ensure_loaded('testdata/foo').
 `, result: map[procedureIndicator]procedure{
-			{name: NewAtom("foo"), arity: 0}: &userDefined{
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 0},
-						raw: NewAtom("foo"),
-						bytecode: bytecode{
-							{opcode: opExit},
-						},
+			{name: NewAtom("foo"), arity: 0}: udWith(&userDefined{}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 0},
+					raw: NewAtom("foo"),
+					bytecode: bytecode{
+						{opcode: opExit},
 					},
 				},
-			},
-			{name: NewAtom("foo"), arity: 1}: &userDefined{
-				multifile: true,
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("c")},
-							{opcode: opExit},
-						},
+			}),
+			{name: NewAtom("foo"), arity: 1}: udWith(&userDefined{multifile: true}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("c")},
+						{opcode: opExit},
 					},
 				},
-			},
+			}),
 		}},
 		{title: "initialization", text: `
 :- initialization(foo(c)).
 `, result: map[procedureIndicator]procedure{
-			{name: NewAtom("foo"), arity: 1}: &userDefined{
-				multifile: true,
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("c")},
-							{opcode: opExit},
-						},
+			{name: NewAtom("foo"), arity: 1}: udWith(&userDefined{multifile: true}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("c")},
+						{opcode: opExit},
 					},
 				},
-			},
+			}),
 		}},
 		{title: "predicate-backed directive", text: `
 :- foo(c).
 `, result: map[procedureIndicator]procedure{
-			{name: NewAtom("foo"), arity: 1}: &userDefined{
-				multifile: true,
-				clauses: clauses{
-					{
-						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
-						bytecode: bytecode{
-							{opcode: opGetConst, operand: NewAtom("c")},
-							{opcode: opExit},
-						},
+			{name: NewAtom("foo"), arity: 1}: udWith(&userDefined{multifile: true}, clauses{
+				{
+					pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+					raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("c")},
+						{opcode: opExit},
 					},
 				},
-			},
+			}),
 		}},
 
 		{title: "error: invalid argument", text: `
@@ -438,26 +410,23 @@ bar(b).
 			vm.operators.define(1000, operatorSpecifierXFY, atomComma)
 			vm.operators.define(400, operatorSpecifierYFX, atomSlash)
 			vm.procedures = map[procedureIndicator]procedure{
-				{name: NewAtom("foo"), arity: 1}: &userDefined{
-					multifile: true,
-					clauses: clauses{
-						{
-							pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
-							raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
-							bytecode: bytecode{
-								{opcode: opGetConst, operand: NewAtom("c")},
-								{opcode: opExit},
-							},
+				{name: NewAtom("foo"), arity: 1}: udWith(&userDefined{multifile: true}, clauses{
+					{
+						pi:  procedureIndicator{name: NewAtom("foo"), arity: 1},
+						raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}},
+						bytecode: bytecode{
+							{opcode: opGetConst, operand: NewAtom("c")},
+							{opcode: opExit},
 						},
 					},
-				},
+				}),
 			}
 			vm.FS = testdata
 			vm.Register1(NewAtom("throw"), Throw)
 			assert.Equal(t, tt.err, vm.Compile(context.Background(), tt.text, tt.args...))
 			if tt.err == nil {
 				delete(vm.procedures, procedureIndicator{name: NewAtom("throw"), arity: 1})
-				assert.Equal(t, tt.result, vm.procedures)
+				assert.True(t, proceduresEqual(tt.result, vm.procedures), "procedures mismatch: expected=%v actual=%v", tt.result, vm.procedures)
 			}
 		})
 	}

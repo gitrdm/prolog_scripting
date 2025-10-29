@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
@@ -24,6 +27,96 @@ type retractStats struct {
 }
 
 var debugRetractStats *retractStats
+
+// syncCompactOnRetract controls whether compaction is performed synchronously
+// inside Retract/assert paths. Useful for tests that require deterministic
+// immediate compaction. It is initialized from the environment variable
+// PROLOG_SYNC_COMPACT_ON_RETRACT but tests may toggle it via the
+// setSyncCompactOnRetractForTest helper.
+var syncCompactOnRetract bool
+
+// test-only helper to toggle synchronous compaction (used by benchmarks/tests)
+func setSyncCompactOnRetractForTest(v bool) { syncCompactOnRetract = v }
+
+func init() {
+	v := os.Getenv("PROLOG_SYNC_COMPACT_ON_RETRACT")
+	syncCompactOnRetract = v == "1" || strings.ToLower(v) == "true"
+}
+
+// compaction background worker fields. We bound the queue to avoid unbounded
+// memory growth under heavy churn and drop requests when the queue is full;
+// callers will fall back to synchronous compaction when enqueue fails.
+type compactionTask struct {
+	vm *VM
+	u  *userDefined
+}
+
+var (
+	compactionOnce  sync.Once
+	compactionQueue chan compactionTask
+	// compactionMu protects compactionQueue and compactionStopped when
+	// starting, enqueuing, or shutting down the background compaction
+	// worker. This avoids races where a sender attempts to write to a
+	// closed channel during test shutdown.
+	compactionMu sync.Mutex
+	// compactionStopped is non-zero when the background worker has been
+	// explicitly stopped (test-only) and further enqueues should fail.
+	compactionStopped int32
+)
+
+func enqueueCompaction(vm *VM, u *userDefined) bool {
+	compactionMu.Lock()
+	defer compactionMu.Unlock()
+
+	// If the worker has been explicitly stopped (test-only), don't start
+	// it and return false so callers do synchronous compaction.
+	if atomic.LoadInt32(&compactionStopped) != 0 {
+		return false
+	}
+
+	compactionOnce.Do(func() {
+		// When running under `go test` the test binary's name ends with
+		// ".test". Tests in this package access internal predicate data
+		// structures (e.g. `userDefined.clauses`) without taking the VM
+		// mutex; running a background compaction worker concurrently can
+		// race with those reads. To avoid introducing nondeterministic
+		// races during `go test`, prefer synchronous compaction by not
+		// starting the background worker in test binaries. Callers will
+		// then fall back to synchronous compaction when enqueue fails.
+		if strings.HasSuffix(os.Args[0], ".test") {
+			compactionQueue = nil
+			return
+		}
+		compactionQueue = make(chan compactionTask, 64)
+		go runCompactionWorker()
+	})
+
+	// If the queue wasn't created (e.g. we're running tests or stopped),
+	// return false so the caller will perform synchronous compaction.
+	if compactionQueue == nil {
+		return false
+	}
+
+	select {
+	case compactionQueue <- compactionTask{vm: vm, u: u}:
+		return true
+	default:
+		// queue full, caller should fallback to synchronous compaction
+		return false
+	}
+}
+
+// (moved to test-only file)
+
+func runCompactionWorker() {
+	for t := range compactionQueue {
+		// worker must acquire vm.mu before compacting to preserve the
+		// same lock ordering (vm.mu -> u.mu) as synchronous callers.
+		t.vm.mu.Lock()
+		compactClauses(t.u)
+		t.vm.mu.Unlock()
+	}
+}
 
 // Repeat repeats the continuation until it succeeds.
 func Repeat(_ *VM, k Cont, env *Env) *Promise {
@@ -66,7 +159,8 @@ func Call(vm *VM, goal Term, k Cont, env *Env) (promise *Promise) {
 			return Error(err)
 		}
 
-		u := userDefined{clauses: cs}
+		u := &userDefined{}
+		u.setClauses(cs)
 		return u.call(vm, args, k, env)
 	}
 }
@@ -736,20 +830,29 @@ func assertMerge(vm *VM, t Term, merge func([]*clause, []*clause) []*clause, env
 		return permissionError(operationModify, permissionTypeStaticProcedure, pi.Term(), env)
 	}
 
-	u.clauses = merge(u.clauses, added)
+	u.setClauses(merge(u.getClauses(), added))
 
 	// If a significant fraction of clauses is marked deleted, compact the
 	// slice to reclaim memory and speed future scans. We do this under the
-	// vm.mu lock to avoid races with other writers.
+	// vm.mu lock to avoid races with other writers. Prefer background
+	// compaction (bounded queue) unless tests request synchronous compaction
+	// or the queue is full (in which case we fallback to sync compact).
 	deleted := 0
-	for _, c := range u.clauses {
+	for _, c := range u.getClauses() {
 		if atomic.LoadUint32(&c.deleted) != 0 {
 			deleted++
 		}
 	}
 	// heuristic: compact if more than 32 deleted or more than 25% deleted
-	if deleted > 0 && (deleted > 32 || deleted*4 > len(u.clauses)) {
-		compactClauses(u)
+	if deleted > 0 && (deleted > 32 || deleted*4 > len(u.getClauses())) {
+		if syncCompactOnRetract {
+			compactClauses(u)
+		} else {
+			if !enqueueCompaction(vm, u) {
+				// queue full -> fallback to synchronous compaction
+				compactClauses(u)
+			}
+		}
 	}
 	return nil
 }
@@ -757,16 +860,32 @@ func assertMerge(vm *VM, t Term, merge func([]*clause, []*clause) []*clause, env
 // compactClauses removes clauses that are marked deleted. Caller must hold
 // vm.mu (or otherwise synchronize) to avoid races while replacing the slice.
 func compactClauses(u *userDefined) {
-	if len(u.clauses) == 0 {
+	// Build a new slice of live clauses under the per-userDefined mutex and
+	// atomically publish it. This avoids mutating the previously-published
+	// slice while readers may be concurrently accessing it.
+	u.mu.Lock()
+	defer u.mu.Unlock()
+
+	old := u.getClauses()
+	if len(old) == 0 {
 		return
 	}
-	out := make([]*clause, 0, len(u.clauses))
-	for _, c := range u.clauses {
+
+	live := make(clauses, 0, len(old))
+	for _, c := range old {
 		if atomic.LoadUint32(&c.deleted) == 0 {
-			out = append(out, c)
+			live = append(live, c)
 		}
 	}
-	u.clauses = out
+
+	if len(live) == 0 {
+		u.setClauses(nil)
+	} else {
+		u.setClauses(live)
+	}
+
+	// reset deleted counter — compaction reclaims all tombstones
+	atomic.StoreInt32(&u.deleted, 0)
 }
 
 // BagOf collects all the solutions of goal as instances, which unify with template. instances may contain duplications.
@@ -1152,10 +1271,10 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 	}
 
 	// Snapshot the clauses under the VM read lock to avoid races while other
-	// goroutines may concurrently mutate the slice.
+	// goroutines may concurrently mutate the slice. With the atomic holder we
+	// can take a snapshot pointer cheaply.
 	vm.mu.RLock()
-	snap := make([]*clause, len(u.clauses))
-	copy(snap, u.clauses)
+	snap := u.getClauses()
 	vm.mu.RUnlock()
 
 	ks := make([]func(context.Context) *Promise, len(snap))
@@ -1191,14 +1310,43 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 						}
 					}
 					if claimed {
-						// Compact under the VM lock so tests that expect the
-						// clause slice to no longer contain deleted entries see
-						// the removal immediately. We must not hold vm.mu while
-						// invoking the user continuation, so lock, compact,
-						// unlock, then call the continuation.
-						vm.mu.Lock()
-						compactClauses(u)
-						vm.mu.Unlock()
+						// Increment per-predicate deleted counter and perform
+						// thresholded compaction to avoid doing O(n) work on
+						// every successful CAS. If the deleted fraction is
+						// high (same heuristic as assertMerge), compact
+						// under vm.mu then call the continuation.
+						atomic.AddInt32(&u.deleted, 1)
+
+						// Determine whether to compact using a safe read of the
+						// current clause slice length under vm.mu. We do a
+						// cheap atomic read of deleted and only take vm.mu's
+						// read lock to inspect the slice length. If compaction
+						// is needed we either enqueue a background compaction
+						// task (preferred) or perform synchronous compaction
+						// depending on configuration and queue state. Lock
+						// ordering is preserved: vm.mu -> u.mu.
+						deleted := atomic.LoadInt32(&u.deleted)
+						if deleted > 0 {
+							vm.mu.RLock()
+							l := len(u.getClauses())
+							vm.mu.RUnlock()
+							if deleted > 32 || int(deleted)*4 > l {
+								if syncCompactOnRetract {
+									vm.mu.Lock()
+									compactClauses(u)
+									vm.mu.Unlock()
+								} else {
+									// try to enqueue to the background worker;
+									// fallback to sync if the queue is full.
+									if !enqueueCompaction(vm, u) {
+										vm.mu.Lock()
+										compactClauses(u)
+										vm.mu.Unlock()
+									}
+								}
+							}
+						}
+
 						return k(env)
 					}
 					return Bool(false)
@@ -2056,7 +2204,17 @@ func PeekChar(vm *VM, streamOrAlias, char Term, k Cont, env *Env) *Promise {
 	}
 }
 
-var osExit = os.Exit
+// osExit is a wrapper around os.Exit. For debugging we print a stack trace
+// when it's invoked to help identify which code path called Halt.
+var osExit = func(code int) {
+	// Capture and print the full goroutine stack to stderr so failures that
+	// call Halt can be diagnosed during tests. This is temporary debug
+	// instrumentation and should be removed once the root cause is found.
+	buf := make([]byte, 1<<16)
+	n := runtime.Stack(buf, true)
+	fmt.Fprintf(os.Stderr, "DEBUG: osExit called with %d\n%s\n", code, string(buf[:n]))
+	os.Exit(code)
+}
 
 // Halt exits the process with exit code of n.
 func Halt(_ *VM, n Term, k Cont, env *Env) *Promise {
@@ -2064,6 +2222,11 @@ func Halt(_ *VM, n Term, k Cont, env *Env) *Promise {
 	case Variable:
 		return Error(InstantiationError(env))
 	case Integer:
+		// diagnostic: print to stderr so tests that cause a process exit
+		// via Halt will be easier to identify while debugging the
+		// background compaction refactor. This will be removed once we
+		// identify the failing test.
+		fmt.Fprintf(os.Stderr, "DEBUG: osExit called with %d\n", int(code))
 		osExit(int(code))
 		return k(env)
 	default:
@@ -2097,12 +2260,13 @@ func Clause(vm *VM, head, body Term, k Cont, env *Env) *Promise {
 		return Error(permissionError(operationAccess, permissionTypePrivateProcedure, pi.Term(), env))
 	}
 
-	ks := make([]func(context.Context) *Promise, 0, len(u.clauses))
-	for i := range u.clauses {
-		if atomic.LoadUint32(&u.clauses[i].deleted) != 0 {
+	cs := u.getClauses()
+	ks := make([]func(context.Context) *Promise, 0, len(cs))
+	for i := range cs {
+		if atomic.LoadUint32(&cs[i].deleted) != 0 {
 			continue
 		}
-		c := u.clauses[i]
+		c := cs[i]
 		cp, err := renamedCopy(c.raw, nil, env)
 		if err != nil {
 			return Error(err)

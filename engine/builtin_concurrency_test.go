@@ -47,7 +47,7 @@ func TestConcurrentAssertz(t *testing.T) {
 		t.Fatalf("predicate foo/1 is not userDefined")
 	}
 	want := goroutines * callsPerG
-	if got := len(u.clauses); got != want {
+	if got := len(u.getClauses()); got != want {
 		t.Fatalf("unexpected clauses: got=%d want=%d", got, want)
 	}
 }
@@ -63,8 +63,10 @@ func TestConcurrentRetract(t *testing.T) {
 	for i := 0; i < total; i++ {
 		clauses = append(clauses, &clause{raw: &compound{functor: NewAtom("f"), args: []Term{NewAtom("x")}}})
 	}
+	ud := &userDefined{dynamic: true}
+	ud.setClauses(clauses)
 	vm.procedures = map[procedureIndicator]procedure{
-		{name: NewAtom("f"), arity: 1}: &userDefined{dynamic: true, clauses: clauses},
+		{name: NewAtom("f"), arity: 1}: ud,
 	}
 
 	// Optionally enable diagnostic counters for Retract if the environment
@@ -124,8 +126,10 @@ func TestConcurrentAbolish(t *testing.T) {
 	runtime.GOMAXPROCS(0)
 
 	var vm VM
+	ud2 := &userDefined{dynamic: true}
+	ud2.setClauses([]*clause{{raw: NewAtom("z")}})
 	vm.procedures = map[procedureIndicator]procedure{
-		{name: NewAtom("z"), arity: 0}: &userDefined{dynamic: true, clauses: []*clause{{raw: NewAtom("z")}}},
+		{name: NewAtom("z"), arity: 0}: ud2,
 	}
 
 	var wg sync.WaitGroup

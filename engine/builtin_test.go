@@ -2578,39 +2578,44 @@ func TestAssertz(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, ok)
 
-		assert.Equal(t, &userDefined{public: true, dynamic: true, clauses: []*clause{
-			&clause{
-				pi: procedureIndicator{
-					name:  NewAtom("foo"),
-					arity: 1,
+		expected := func() *userDefined {
+			ud := &userDefined{public: true, dynamic: true}
+			ud.setClauses([]*clause{
+				&clause{
+					pi: procedureIndicator{
+						name:  NewAtom("foo"),
+						arity: 1,
+					},
+					raw: &compound{
+						functor: NewAtom("foo"),
+						args:    []Term{NewAtom("a")},
+					},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("a")},
+						{opcode: opExit},
+					},
 				},
-				raw: &compound{
-					functor: NewAtom("foo"),
-					args:    []Term{NewAtom("a")},
+				&clause{
+					pi: procedureIndicator{
+						name:  NewAtom("foo"),
+						arity: 1,
+					},
+					raw: &compound{
+						functor: NewAtom("foo"),
+						args:    []Term{NewAtom("b")},
+					},
+					bytecode: bytecode{
+						{opcode: opGetConst, operand: NewAtom("b")},
+						{opcode: opExit},
+					},
 				},
-				bytecode: bytecode{
-					{opcode: opGetConst, operand: NewAtom("a")},
-					{opcode: opExit},
-				},
-			},
-			&clause{
-				pi: procedureIndicator{
-					name:  NewAtom("foo"),
-					arity: 1,
-				},
-				raw: &compound{
-					functor: NewAtom("foo"),
-					args:    []Term{NewAtom("b")},
-				},
-				bytecode: bytecode{
-					{opcode: opGetConst, operand: NewAtom("b")},
-					{opcode: opExit},
-				},
-			},
-		}}, vm.procedures[procedureIndicator{
+			})
+			return ud
+		}()
+		assert.True(t, procedureEqual(expected, vm.procedures[procedureIndicator{
 			name:  NewAtom("foo"),
 			arity: 1,
-		}])
+		}]))
 	})
 
 	t.Run("clause is a variable", func(t *testing.T) {
@@ -2708,7 +2713,7 @@ func TestAsserta(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, ok)
 
-		assert.Equal(t, &userDefined{public: true, dynamic: true, clauses: []*clause{
+		expected := udWithClauses(&userDefined{public: true, dynamic: true}, []*clause{
 			&clause{
 				pi: procedureIndicator{name: NewAtom("foo"), arity: 1},
 				raw: &compound{
@@ -2731,7 +2736,8 @@ func TestAsserta(t *testing.T) {
 					{opcode: opExit},
 				},
 			},
-		}}, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 1}])
+		})
+		assert.True(t, procedureEqual(expected, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 1}]))
 	})
 
 	t.Run("rule", func(t *testing.T) {
@@ -2759,7 +2765,7 @@ func TestAsserta(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, ok)
 
-		assert.Equal(t, &userDefined{public: true, dynamic: true, clauses: []*clause{
+		expected := udWithClauses(&userDefined{public: true, dynamic: true}, []*clause{
 			&clause{
 				pi: procedureIndicator{name: NewAtom("foo"), arity: 0},
 				raw: &compound{
@@ -2805,7 +2811,8 @@ func TestAsserta(t *testing.T) {
 					{opcode: opExit},
 				},
 			},
-		}}, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 0}])
+		})
+		assert.True(t, procedureEqual(expected, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 0}]))
 	})
 
 	t.Run("clause is a variable", func(t *testing.T) {
@@ -2911,11 +2918,11 @@ func TestRetract(t *testing.T) {
 	t.Run("retract the first one", func(t *testing.T) {
 		vm := VM{
 			procedures: map[procedureIndicator]procedure{
-				{name: NewAtom("foo"), arity: 1}: &userDefined{dynamic: true, clauses: []*clause{
+				{name: NewAtom("foo"), arity: 1}: udWithClauses(&userDefined{dynamic: true}, []*clause{
 					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}}},
 					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}}},
 					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}}},
-				}},
+				}),
 			},
 		}
 
@@ -2926,20 +2933,29 @@ func TestRetract(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, ok)
 
-		assert.Equal(t, &userDefined{dynamic: true, clauses: []*clause{
-			&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}}},
-			&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}}},
-		}}, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 1}])
+		expected := func() *userDefined {
+			ud := &userDefined{dynamic: true}
+			ud.setClauses([]*clause{
+				&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}}},
+				&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}}},
+			})
+			return ud
+		}()
+		assert.True(t, procedureEqual(expected, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 1}]))
 	})
 
 	t.Run("retract the specific one", func(t *testing.T) {
 		vm := VM{
 			procedures: map[procedureIndicator]procedure{
-				{name: NewAtom("foo"), arity: 1}: &userDefined{dynamic: true, clauses: []*clause{
-					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}}},
-					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}}},
-					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}}},
-				}},
+				{name: NewAtom("foo"), arity: 1}: func() *userDefined {
+					ud := &userDefined{dynamic: true}
+					ud.setClauses([]*clause{
+						&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}}},
+						&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}}},
+						&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}}},
+					})
+					return ud
+				}(),
 			},
 		}
 
@@ -2950,20 +2966,29 @@ func TestRetract(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, ok)
 
-		assert.Equal(t, &userDefined{dynamic: true, clauses: []*clause{
-			&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}}},
-			&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}}},
-		}}, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 1}])
+		expected := func() *userDefined {
+			ud := &userDefined{dynamic: true}
+			ud.setClauses([]*clause{
+				&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}}},
+				&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}}},
+			})
+			return ud
+		}()
+		assert.True(t, procedureEqual(expected, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 1}]))
 	})
 
 	t.Run("retract all", func(t *testing.T) {
 		vm := VM{
 			procedures: map[procedureIndicator]procedure{
-				{name: NewAtom("foo"), arity: 1}: &userDefined{dynamic: true, clauses: []*clause{
-					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}}},
-					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}}},
-					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}}},
-				}},
+				{name: NewAtom("foo"), arity: 1}: func() *userDefined {
+					ud := &userDefined{dynamic: true}
+					ud.setClauses([]*clause{
+						&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}}},
+						&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}}},
+						&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}}},
+					})
+					return ud
+				}(),
 			},
 		}
 
@@ -2973,7 +2998,7 @@ func TestRetract(t *testing.T) {
 		}, Failure, nil).Force(context.Background())
 		assert.NoError(t, err)
 		assert.False(t, ok)
-		assert.Empty(t, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 1}].(*userDefined).clauses)
+		assert.Empty(t, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 1}].(*userDefined).getClauses())
 	})
 
 	t.Run("variable", func(t *testing.T) {
@@ -3019,9 +3044,13 @@ func TestRetract(t *testing.T) {
 	t.Run("exception in continuation", func(t *testing.T) {
 		vm := VM{
 			procedures: map[procedureIndicator]procedure{
-				{name: NewAtom("foo"), arity: 1}: &userDefined{dynamic: true, clauses: []*clause{
-					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}}},
-				}},
+				{name: NewAtom("foo"), arity: 1}: func() *userDefined {
+					ud := &userDefined{dynamic: true}
+					ud.setClauses([]*clause{
+						&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}}},
+					})
+					return ud
+				}(),
 			},
 		}
 
@@ -3035,7 +3064,7 @@ func TestRetract(t *testing.T) {
 		assert.False(t, ok)
 
 		// removed
-		assert.Empty(t, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 1}].(*userDefined).clauses)
+		assert.Empty(t, vm.procedures[procedureIndicator{name: NewAtom("foo"), arity: 1}].(*userDefined).getClauses())
 	})
 }
 
@@ -3043,11 +3072,15 @@ func TestAbolish(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
 		vm := VM{
 			procedures: map[procedureIndicator]procedure{
-				{name: NewAtom("foo"), arity: 1}: &userDefined{dynamic: true, clauses: []*clause{
-					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}}},
-					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}}},
-					&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}}},
-				}},
+				{name: NewAtom("foo"), arity: 1}: func() *userDefined {
+					ud := &userDefined{dynamic: true}
+					ud.setClauses([]*clause{
+						&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("a")}}},
+						&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("b")}}},
+						&clause{raw: &compound{functor: NewAtom("foo"), args: []Term{NewAtom("c")}}},
+					})
+					return ud
+				}(),
 			},
 		}
 
@@ -5402,15 +5435,19 @@ func TestClause(t *testing.T) {
 
 		vm := VM{
 			procedures: map[procedureIndicator]procedure{
-				{name: NewAtom("green"), arity: 1}: &userDefined{public: true, clauses: []*clause{
-					&clause{raw: &compound{
-						functor: atomIf, args: []Term{
-							&compound{functor: NewAtom("green"), args: []Term{x}},
-							&compound{functor: NewAtom("moldy"), args: []Term{x}},
-						},
-					}},
-					&clause{raw: &compound{functor: NewAtom("green"), args: []Term{NewAtom("kermit")}}},
-				}},
+				{name: NewAtom("green"), arity: 1}: func() *userDefined {
+					ud := &userDefined{public: true}
+					ud.setClauses([]*clause{
+						&clause{raw: &compound{
+							functor: atomIf, args: []Term{
+								&compound{functor: NewAtom("green"), args: []Term{x}},
+								&compound{functor: NewAtom("moldy"), args: []Term{x}},
+							},
+						}},
+						&clause{raw: &compound{functor: NewAtom("green"), args: []Term{NewAtom("kermit")}}},
+					})
+					return ud
+				}(),
 			},
 		}
 		ok, err := Clause(&vm, &compound{
@@ -5490,9 +5527,13 @@ func TestClause(t *testing.T) {
 
 		vm := VM{
 			procedures: map[procedureIndicator]procedure{
-				{name: NewAtom("green"), arity: 1}: &userDefined{public: true, clauses: []*clause{
-					&clause{raw: NewAtom("green").Apply(NewVariable(), NewVariable(), NewVariable(), NewVariable(), NewVariable(), NewVariable(), NewVariable(), NewVariable(), NewVariable())},
-				}},
+				{name: NewAtom("green"), arity: 1}: func() *userDefined {
+					ud := &userDefined{public: true}
+					ud.setClauses([]*clause{
+						&clause{raw: NewAtom("green").Apply(NewVariable(), NewVariable(), NewVariable(), NewVariable(), NewVariable(), NewVariable(), NewVariable(), NewVariable(), NewVariable())},
+					})
+					return ud
+				}(),
 			},
 		}
 		ok, err := Clause(&vm, NewAtom("green").Apply(NewVariable()), NewVariable(), Success, nil).Force(context.Background())

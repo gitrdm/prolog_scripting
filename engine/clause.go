@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 )
 
@@ -13,10 +14,47 @@ type userDefined struct {
 	discontiguous bool
 
 	// 7.4.3 says "If no clauses are defined for a procedure indicated by a directive ... then the procedure shall exist but have no clauses."
-	clauses
+	// clausesHolder holds an atomically-updatable pointer to the slice of
+	// clause pointers for this predicate. Readers may take a snapshot via
+	// getClauses() without holding the VM lock; writers should use
+	// setClauses() under the existing vm.mu contract.
+	clausesHolder
+
+	// mu protects mutations that modify u.clauses in-place. This allows us to
+	// perform compaction without holding the global vm.mu for the entire
+	// operation, reducing global contention (lock order: vm.mu -> u.mu).
+	mu sync.Mutex
+
+	// deleted is a fast, atomic counter of tombstoned clauses. Retract will
+	// increment this when it successfully claims a clause and compaction will
+	// reset it to zero after reclaiming tombstones.
+	deleted int32
 }
 
 type clauses []*clause
+
+// clausesHolder wraps an atomic pointer to a clauses value so callers can
+// atomically load/store the slice reference. We allocate a new value when
+// storing to avoid races with readers.
+type clausesHolder struct {
+	p atomic.Pointer[clauses]
+}
+
+func (h *clausesHolder) load() clauses {
+	pp := h.p.Load()
+	if pp == nil {
+		return nil
+	}
+	return *pp
+}
+
+func (h *clausesHolder) store(cs clauses) {
+	np := new(clauses)
+	*np = cs
+	h.p.Store(np)
+}
+
+// Helper accessors on userDefined are provided below.
 
 func (cs clauses) call(vm *VM, args []Term, k Cont, env *Env) *Promise {
 	var p *Promise
@@ -37,6 +75,25 @@ func (cs clauses) call(vm *VM, args []Term, k Cont, env *Env) *Promise {
 	}
 	p = Delay(ks...)
 	return p
+}
+
+// getClauses returns a snapshot of the clause slice.
+func (u *userDefined) getClauses() clauses {
+	return u.clausesHolder.load()
+}
+
+// setClauses sets the clause slice atomically. Callers should hold vm.mu
+// where appropriate when performing a read-modify-write.
+func (u *userDefined) setClauses(cs clauses) {
+	u.clausesHolder.store(cs)
+}
+
+// call dispatches to the current clause list. This allows userDefined to
+// implement the procedure interface by delegating to the active clauses
+// snapshot.
+func (u *userDefined) call(vm *VM, args []Term, k Cont, env *Env) *Promise {
+	cs := u.getClauses()
+	return cs.call(vm, args, k, env)
 }
 
 func compile(t Term, env *Env) (clauses, error) {
