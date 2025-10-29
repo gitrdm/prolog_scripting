@@ -680,6 +680,8 @@ func Op(vm *VM, priority, specifier, op Term, k Cont, env *Env) *Promise {
 		}
 	}
 
+	// Mutating the operators table requires holding the VM lock.
+	vm.mu.Lock()
 	for _, name := range names {
 		if class := spec.class(); vm.operators.definedInClass(name, spec.class()) {
 			vm.operators.remove(name, class)
@@ -687,6 +689,7 @@ func Op(vm *VM, priority, specifier, op Term, k Cont, env *Env) *Promise {
 
 		vm.operators.define(p, spec, name)
 	}
+	vm.mu.Unlock()
 
 	return k(env)
 }
@@ -694,13 +697,15 @@ func Op(vm *VM, priority, specifier, op Term, k Cont, env *Env) *Promise {
 func validateOp(vm *VM, p Integer, spec operatorSpecifier, name Atom, env *Env) *Promise {
 	switch name {
 	case atomComma:
-		if vm.operators.definedInClass(name, operatorClassInfix) {
+		ops := vm.OperatorsCopy()
+		if ops != nil && ops.definedInClass(name, operatorClassInfix) {
 			return Error(permissionError(operationModify, permissionTypeOperator, name, env))
 		}
 	case atomBar:
 		if spec.class() != operatorClassInfix || (p > 0 && p < 1001) {
 			op := operationCreate
-			if vm.operators.definedInClass(name, operatorClassInfix) {
+			ops := vm.OperatorsCopy()
+			if ops != nil && ops.definedInClass(name, operatorClassInfix) {
 				op = operationModify
 			}
 			return Error(permissionError(op, permissionTypeOperator, name, env))
@@ -710,13 +715,14 @@ func validateOp(vm *VM, p Integer, spec operatorSpecifier, name Atom, env *Env) 
 	}
 
 	// 6.3.4.3 There shall not be an infix and a postfix Operator with the same name.
+	ops := vm.OperatorsCopy()
 	switch spec.class() {
 	case operatorClassInfix:
-		if vm.operators.definedInClass(name, operatorClassPostfix) {
+		if ops != nil && ops.definedInClass(name, operatorClassPostfix) {
 			return Error(permissionError(operationCreate, permissionTypeOperator, name, env))
 		}
 	case operatorClassPostfix:
-		if vm.operators.definedInClass(name, operatorClassInfix) {
+		if ops != nil && ops.definedInClass(name, operatorClassInfix) {
 			return Error(permissionError(operationCreate, permissionTypeOperator, name, env))
 		}
 	}
@@ -773,8 +779,12 @@ func CurrentOp(vm *VM, priority, specifier, op Term, k Cont, env *Env) *Promise 
 	}
 
 	pattern := tuple(priority, specifier, op)
-	ks := make([]func(context.Context) *Promise, 0, len(vm.operators)*int(_operatorClassLen))
-	for _, ops := range vm.operators {
+	// Take a snapshot of the operator table so we don't iterate the VM
+	// internal map without synchronization. OperatorsCopy returns a shallow
+	// copy guarded by vm.mu.
+	opsSnapshot := vm.OperatorsCopy()
+	ks := make([]func(context.Context) *Promise, 0, len(opsSnapshot)*int(_operatorClassLen))
+	for _, ops := range opsSnapshot {
 		for _, op := range ops {
 			op := op
 			if op == (operator{}) {
@@ -1720,7 +1730,9 @@ func WriteTerm(vm *VM, streamOrAlias, t, options Term, k Cont, env *Env) *Promis
 	}
 
 	opts := WriteOptions{
-		ops:      vm.operators,
+		// Snapshot operator table so printing doesn't iterate VM internals
+		// without synchronization.
+		ops:      vm.OperatorsCopy(),
 		priority: 1200,
 	}
 	iter := ListIterator{List: options, Env: env}
@@ -2866,10 +2878,8 @@ func CurrentCharConversion(vm *VM, inChar, outChar Term, k Cont, env *Env) *Prom
 
 	if c1, ok := env.Resolve(inChar).(Atom); ok {
 		r := []rune(c1.String())
-		vm.mu.RLock()
-		cr, ok := vm.charConversions[r[0]]
-		vm.mu.RUnlock()
-		if ok {
+		cc := vm.CharConversionsCopy()
+		if cr, ok := cc[r[0]]; ok {
 			return Unify(vm, outChar, Atom(cr), k, env)
 		}
 		return Unify(vm, outChar, c1, k, env)
@@ -2877,17 +2887,20 @@ func CurrentCharConversion(vm *VM, inChar, outChar Term, k Cont, env *Env) *Prom
 
 	pattern := tuple(inChar, outChar)
 	ks := make([]func(context.Context) *Promise, 256)
+	cc := vm.CharConversionsCopy()
 	for i := 0; i < 256; i++ {
 		r := rune(i)
-		vm.mu.RLock()
-		cr, ok := vm.charConversions[r]
-		vm.mu.RUnlock()
-		if !ok {
-			cr = r
+		cr := r
+		if cc != nil {
+			if v, has := cc[r]; has {
+				cr = v
+			}
 		}
-
+		// capture locals for closure
+		rr := r
+		ccr := cr
 		ks[i] = func(context.Context) *Promise {
-			return Unify(vm, pattern, tuple(Atom(r), Atom(cr)), k, env)
+			return Unify(vm, pattern, tuple(Atom(rr), Atom(ccr)), k, env)
 		}
 	}
 	return Delay(ks...)

@@ -627,6 +627,30 @@ func (vm *VM) DoubleQuotes() doubleQuotes {
 	return dq
 }
 
+// CharConversionsCopy returns a shallow copy of the VM's character conversion
+// map. The copy may be iterated without holding vm.mu.
+func (vm *VM) CharConversionsCopy() map[rune]rune {
+	vm.mu.RLock()
+	if vm.charConversions == nil {
+		vm.mu.RUnlock()
+		return nil
+	}
+	cp := make(map[rune]rune, len(vm.charConversions))
+	for k, v := range vm.charConversions {
+		cp[k] = v
+	}
+	vm.mu.RUnlock()
+	return cp
+}
+
+// CharConvEnabled returns whether character conversion is enabled on the VM.
+func (vm *VM) CharConvEnabled() bool {
+	vm.mu.RLock()
+	b := vm.charConvEnabled
+	vm.mu.RUnlock()
+	return b
+}
+
 // bytecodeEqual compares two bytecode sequences for equality. We use a deep
 // comparison of the operand to keep the check simple and robust across
 // different operand types (Term, procedureIndicator, Integer, etc.).

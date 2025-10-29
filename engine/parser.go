@@ -57,13 +57,19 @@ func NewParser(vm *VM, r io.RuneReader) *Parser {
 	dq := vm.doubleQuotes
 	vm.mu.Unlock()
 
-	return &Parser{
+	p := &Parser{
 		lexer: Lexer{
 			input: newRuneRingBuffer(r),
 		},
 		operators:    ops,
 		doubleQuotes: dq,
 	}
+
+	// Initialize lexer char conversions from the VM snapshot so the lexer
+	// applies the same conversions during parsing.
+	p.Refresh(vm)
+
+	return p
 }
 
 // Refresh updates parser's snapshot of operators and doubleQuotes from the VM.
@@ -82,10 +88,21 @@ func (p *Parser) Refresh(vm *VM) {
 		ops[k] = v
 	}
 	dq := vm.doubleQuotes
+
+	// copy char conversions
+	var cc map[rune]rune
+	if vm.charConversions != nil {
+		cc = make(map[rune]rune, len(vm.charConversions))
+		for k, v := range vm.charConversions {
+			cc[k] = v
+		}
+	}
+
 	vm.mu.Unlock()
 
 	p.operators = ops
 	p.doubleQuotes = dq
+	p.lexer.charConversions = cc
 }
 
 // SetPlaceholder registers placeholder and its arguments. Every occurrence of placeholder will be replaced by arguments.
