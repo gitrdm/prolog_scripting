@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -196,4 +197,56 @@ func TestCodeList_WriteTerm(t *testing.T) {
 
 func TestCodeList_Compare(t *testing.T) {
 	assert.Equal(t, 0, CodeList("abc").Compare(List(Integer('a'), Integer('b'), Integer('c')), nil))
+}
+
+func TestCompound_GoString(t *testing.T) {
+	c := &compound{
+		functor: NewAtom("f"),
+		args:    []Term{NewAtom("a"), NewAtom("b")},
+	}
+	s := c.GoString()
+	assert.True(t, strings.HasPrefix(s, "&engine.compound{"))
+	assert.Contains(t, s, "functor")
+	assert.Contains(t, s, "args")
+}
+func TestList_GoString(t *testing.T) {
+	l := list{NewAtom("a"), NewAtom("b")}
+	s := l.GoString()
+	assert.True(t, strings.HasPrefix(s, "engine.list{"))
+	// ensure two elements are present
+	assert.Contains(t, s, ",")
+}
+
+func TestPartial_GoString(t *testing.T) {
+	p := &partial{
+		Compound: list{NewAtom("a")},
+		tail:     &[]Term{NewAtom("rest")}[0],
+	}
+	s := p.GoString()
+	assert.True(t, strings.HasPrefix(s, "engine.partial{"))
+	assert.Contains(t, s, "Compound")
+	assert.Contains(t, s, "tail")
+}
+
+func TestList_Compare(t *testing.T) {
+	l1 := list{NewAtom("a"), NewAtom("b")}
+	l2 := list{NewAtom("a"), NewAtom("c")}
+	assert.Equal(t, 0, l1.Compare(l1, nil))
+	assert.Equal(t, -1, l1.Compare(l2, nil))
+	assert.Equal(t, 1, l2.Compare(l1, nil))
+}
+
+func TestPartial_Compare(t *testing.T) {
+	p1 := &partial{
+		Compound: list{NewAtom("a")},
+		tail:     &[]Term{NewAtom("rest")}[0],
+	}
+	p2 := &partial{
+		Compound: list{NewAtom("a")},
+		tail:     &[]Term{NewAtom("other")}[0],
+	}
+	assert.Equal(t, 0, p1.Compare(p1, nil))
+	// lexical order: "other" < "rest" so p1 > p2
+	assert.Equal(t, 1, p1.Compare(p2, nil))
+	assert.Equal(t, -1, p2.Compare(p1, nil))
 }

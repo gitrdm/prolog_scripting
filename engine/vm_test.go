@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"testing"
@@ -267,6 +268,68 @@ func TestVM_SetUserOutput(t *testing.T) {
 	})
 }
 
+func TestVM_CharConvEnabled(t *testing.T) {
+	var vm VM
+	assert.False(t, vm.CharConvEnabled()) // default false
+
+	vm.SetCharConvEnabled(true)
+	assert.True(t, vm.CharConvEnabled())
+}
+
+func TestVM_IsLoaded(t *testing.T) {
+	var vm VM
+	assert.False(t, vm.IsLoaded("foo.pl"))
+
+	vm.MarkLoaded("foo.pl")
+	assert.True(t, vm.IsLoaded("foo.pl"))
+
+	vm.UnmarkLoaded("foo.pl")
+	assert.False(t, vm.IsLoaded("foo.pl"))
+}
+
+func TestVM_InstallProcedure(t *testing.T) {
+	var vm VM
+	pi := procedureIndicator{name: NewAtom("foo"), arity: 1}
+	p := Predicate1(func(_ *VM, _ Term, k Cont, env *Env) *Promise { return k(env) })
+
+	vm.InstallProcedure(pi, p)
+
+	_, ok := vm.LookupProcedure(pi)
+	assert.True(t, ok)
+}
+
+func TestBytecodeEqual(t *testing.T) {
+	t.Run("equal", func(t *testing.T) {
+		a := bytecode{
+			{opcode: opEnter, operand: Integer(0)},
+			{opcode: opCall, operand: procedureIndicator{name: NewAtom("foo"), arity: 1}},
+		}
+		b := bytecode{
+			{opcode: opEnter, operand: Integer(0)},
+			{opcode: opCall, operand: procedureIndicator{name: NewAtom("foo"), arity: 1}},
+		}
+		assert.True(t, bytecodeEqual(a, b))
+	})
+
+	t.Run("different length", func(t *testing.T) {
+		a := bytecode{{opcode: opEnter, operand: Integer(0)}}
+		b := bytecode{}
+		assert.False(t, bytecodeEqual(a, b))
+	})
+
+	t.Run("different opcode", func(t *testing.T) {
+		a := bytecode{{opcode: opEnter, operand: Integer(0)}}
+		b := bytecode{{opcode: opCall, operand: Integer(0)}}
+		assert.False(t, bytecodeEqual(a, b))
+	})
+
+	t.Run("different operand", func(t *testing.T) {
+		a := bytecode{{opcode: opEnter, operand: Integer(0)}}
+		b := bytecode{{opcode: opEnter, operand: Integer(1)}}
+		assert.False(t, bytecodeEqual(a, b))
+	})
+}
+
 func TestProcedureIndicator_Apply(t *testing.T) {
 	t.Run("ok", func(t *testing.T) {
 		c, err := procedureIndicator{name: NewAtom("foo"), arity: 2}.Apply(NewAtom("a"), NewAtom("b"))
@@ -281,5 +344,50 @@ func TestProcedureIndicator_Apply(t *testing.T) {
 		c, err := procedureIndicator{name: NewAtom("foo"), arity: 2}.Apply(NewAtom("a"), NewAtom("b"), NewAtom("c"))
 		assert.Error(t, err)
 		assert.Nil(t, c)
+	})
+}
+
+func TestProcedureIndicator_TermInterface(t *testing.T) {
+	pi := procedureIndicator{name: NewAtom("foo"), arity: 2}
+
+	t.Run("WriteTerm", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := pi.WriteTerm(&buf, &WriteOptions{}, nil)
+		assert.NoError(t, err)
+		assert.Equal(t, "/(foo,2)", buf.String())
+	})
+
+	t.Run("Compare", func(t *testing.T) {
+		pi2 := procedureIndicator{name: NewAtom("foo"), arity: 2}
+		assert.Equal(t, 0, pi.Compare(pi2, nil))
+
+		pi3 := procedureIndicator{name: NewAtom("bar"), arity: 2}
+		assert.Equal(t, 1, pi.Compare(pi3, nil)) // foo > bar
+
+		pi4 := procedureIndicator{name: NewAtom("foo"), arity: 1}
+		assert.Equal(t, 1, pi.Compare(pi4, nil)) // arity 2 > 1
+	})
+
+	t.Run("Functor", func(t *testing.T) {
+		assert.Equal(t, atomSlash, pi.Functor())
+	})
+
+	t.Run("Arity", func(t *testing.T) {
+		assert.Equal(t, 2, pi.Arity())
+	})
+
+	t.Run("Arg", func(t *testing.T) {
+		assert.Equal(t, NewAtom("foo"), pi.Arg(0))
+		assert.Equal(t, Integer(2), pi.Arg(1))
+	})
+
+	t.Run("String", func(t *testing.T) {
+		assert.Equal(t, "foo/2", pi.String())
+	})
+
+	t.Run("Term", func(t *testing.T) {
+		term := pi.Term()
+		expected := atomSlash.Apply(NewAtom("foo"), Integer(2))
+		assert.Equal(t, expected, term)
 	})
 }
