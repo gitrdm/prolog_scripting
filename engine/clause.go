@@ -108,6 +108,9 @@ func compile(t Term, env *Env) (clauses, error) {
 				return nil, typeError(validTypeCallable, body, env)
 			}
 			c.raw = t
+			// cache the rulified form at compile time to avoid allocating a
+			// new wrapper in Retract for every clause scan.
+			c.rulified = rulify(c.raw, env)
 			// store as pointer
 			cs = append(cs, &c)
 		}
@@ -116,12 +119,18 @@ func compile(t Term, env *Env) (clauses, error) {
 
 	c, err := compileClause(t, nil, env)
 	c.raw = env.simplify(t)
+	c.rulified = rulify(c.raw, env)
 	return []*clause{&c}, err
 }
 
 type clause struct {
 	pi       procedureIndicator
 	raw      Term
+	// rulified is the canonical rule form of raw, i.e. ensures it's an if/2
+	// term (H:-B). Precomputing this at compile time avoids repeated
+	// allocations in hot paths like Retract where we only need the normalized
+	// form for matching.
+	rulified Term
 	vars     []Variable
 	bytecode bytecode
 	// deleted is a marker (0 == active, 1 == deleted) set atomically by Retract/Abolish.
