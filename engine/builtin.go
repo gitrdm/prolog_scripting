@@ -1301,14 +1301,14 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 	ks := make([]func(context.Context) *Promise, len(snap))
 	for i, c := range snap {
 		i := i
-	// capture a reference to the clause's compiled bytecode and the raw
-	// term. Clause bytecode is immutable after compilation, so taking a
-	// reference avoids an expensive allocation+copy per-clause while still
-	// letting us detect whether the currently-published clause matches the
-	// snapshot later on. (Avoiding the copy reduces GC pressure in hot
-	// paths.)
-	capturedBC := c.bytecode
-	raw := rulify(c.raw, env)
+		// capture a reference to the clause's compiled bytecode and the raw
+		// term. Clause bytecode is immutable after compilation, so taking a
+		// reference avoids an expensive allocation+copy per-clause while still
+		// letting us detect whether the currently-published clause matches the
+		// snapshot later on. (Avoiding the copy reduces GC pressure in hot
+		// paths.)
+		capturedBC := c.bytecode
+		raw := rulify(c.raw, env)
 
 		ks[i] = func(_ context.Context) *Promise {
 			return Unify(vm, t, raw, func(env *Env) *Promise {
