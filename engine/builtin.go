@@ -1373,7 +1373,7 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 					return Bool(false)
 				}, env)
 			}
-	}(i, capturedBC, capturedFP))
+		}(i, capturedBC, capturedFP))
 	}
 	return Delay(ks...)
 }
