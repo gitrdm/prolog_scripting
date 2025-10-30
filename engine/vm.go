@@ -764,10 +764,27 @@ func bytecodeEqual(a, b bytecode) bool {
 	if len(a) != len(b) {
 		return false
 	}
+	// Fast-path: if the slices share the same backing array (common when we
+	// took a direct reference instead of copying), the bytecode can't have
+	// changed and we can return quickly.
+	if len(a) > 0 && len(b) > 0 {
+		if &a[0] == &b[0] {
+			return true
+		}
+	}
+
 	for i := range a {
 		if a[i].opcode != b[i].opcode {
 			return false
 		}
+		// Cheap identity check first. In the common case operands are the
+		// same interface value (pointer equality) and this avoids the cost of
+		// reflect.DeepEqual.
+		if a[i].operand == b[i].operand {
+			continue
+		}
+		// Fallback to deep-equality only when necessary to preserve the
+		// original semantics.
 		if !reflect.DeepEqual(a[i].operand, b[i].operand) {
 			return false
 		}
