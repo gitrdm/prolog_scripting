@@ -14,6 +14,10 @@ var (
 type Promise struct {
 	// delayed execution with multiple choices
 	delayed []func(context.Context) *Promise
+	// delayedGen is an optional generator that produces the next child
+	// closure on demand. When set, it is used instead of the `delayed`
+	// slice to avoid materializing all alternatives eagerly.
+	delayedGen func() (func(context.Context) *Promise, bool)
 
 	// final result
 	ok  bool
@@ -28,6 +32,13 @@ type Promise struct {
 // Delay delays an execution of k.
 func Delay(k ...func(context.Context) *Promise) *Promise {
 	return &Promise{delayed: k}
+}
+
+// DelayGenerator creates a promise whose alternatives are produced lazily by
+// calling gen repeatedly. gen should return (fn, true) to provide the next
+// alternative, or (nil, false) when there are no more alternatives.
+func DelayGenerator(gen func() (func(context.Context) *Promise, bool)) *Promise {
+	return &Promise{delayedGen: gen}
 }
 
 // Bool returns a promise that simply returns (ok, nil).
@@ -114,6 +125,18 @@ func (p *Promise) Force(ctx context.Context) (ok bool, err error) {
 
 func (p *Promise) child(ctx context.Context) (promise *Promise) {
 	defer ensurePromise(&promise)
+	// If this promise was created with a generator, use it to obtain the
+	// next child lazily. The generator is responsible for internal
+	// iteration/state and should return (fn, true) or (nil, false) when
+	// exhausted.
+	if p.delayedGen != nil {
+		fn, ok := p.delayedGen()
+		if !ok {
+			return Bool(false)
+		}
+		return fn(ctx)
+	}
+
 	defer func() {
 		if !p.repeat {
 			p.delayed, p.delayed[0] = p.delayed[1:], nil

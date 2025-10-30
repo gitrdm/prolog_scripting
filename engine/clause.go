@@ -86,7 +86,39 @@ func (u *userDefined) getClauses() clauses {
 // setClauses sets the clause slice atomically. Callers should hold vm.mu
 // where appropriate when performing a read-modify-write.
 func (u *userDefined) setClauses(cs clauses) {
-	u.clausesHolder.store(cs)
+	// Ensure incoming clauses are compiled (have rulified, bytecode & fingerprint)
+	// This keeps the published snapshot robust: callers may pass freshly-constructed
+	// clause objects with only `raw` populated (tests, embedders). Rather than
+	// relying on a runtime fallback in hot paths like Retract, compile them once
+	// at publication time. This keeps the external API stable while avoiding
+	// surprising runtime behavior.
+	var compiled clauses
+	for _, c := range cs {
+		if c == nil {
+			continue
+		}
+		if c.rulified != nil && len(c.bytecode) > 0 && c.fingerprint != 0 {
+			// already compiled
+			compiled = append(compiled, c)
+			continue
+		}
+
+		// Try to compile the raw term into one or more clauses. Use a fresh
+		// environment like tests do. If compile fails for any reason, fall
+		// back to storing the original clause to avoid losing data.
+		if c.raw == nil {
+			compiled = append(compiled, c)
+			continue
+		}
+		cs2, err := compile(c.raw, NewEnv())
+		if err != nil {
+			compiled = append(compiled, c)
+			continue
+		}
+		compiled = append(compiled, cs2...)
+	}
+
+	u.clausesHolder.store(compiled)
 }
 
 // call dispatches to the current clause list. This allows userDefined to

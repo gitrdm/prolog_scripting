@@ -1308,34 +1308,38 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 		if atomic.LoadUint32(&snap[i].deleted) != 0 {
 			continue
 		}
-		// capture a small copy of the compiled bytecode header only; avoid
-		// capturing the larger `rulified` Term here.
-		capturedBC := snap[i].bytecode
-		capturedFP := snap[i].fingerprint
 
-		// bind i, capturedBC and capturedFP into the closure via a factory to ensure we
-		// don't accidentally capture the loop variable.
-		ks = append(ks, func(idx int, cb bytecode, cfp uint64) func(context.Context) *Promise {
+		// Capture the clause pointer and its per-clause compiled data at
+		// generation time. This avoids referencing the snapshot index at
+		// call time and guarantees the closure has its own copy of the
+		// small-term and compiled header used for fast-path comparisons.
+		c := snap[i]
+		capturedBC := c.bytecode
+		capturedFP := c.fingerprint
+		capturedRulified := c.rulified
+
+		// bind c and captured values into the closure via a factory to
+		// ensure we don't accidentally capture the loop variable.
+		ks = append(ks, func(cl *clause, cb bytecode, cfp uint64, rul Term) func(context.Context) *Promise {
 			return func(_ context.Context) *Promise {
-				// Resolve the normalized clause form at call time from the
-				// snapshot; this avoids storing it on the heap inside every
-				// closure.
-				return Unify(vm, t, snap[idx].rulified, func(env *Env) *Promise {
+				// Use the captured normalized clause form directly.
+				return Unify(vm, t, rul, func(env *Env) *Promise {
 					if p := debugRetractStats.Load(); p != nil {
 						atomic.AddUint64(&p.attempts, 1)
 					}
-					// Attempt to claim the specific clause this alternative corresponds to.
+
 					// skip already-deleted clauses
-					if atomic.LoadUint32(&snap[idx].deleted) != 0 {
+					if atomic.LoadUint32(&cl.deleted) != 0 {
 						return Bool(false)
 					}
 					if p := debugRetractStats.Load(); p != nil {
 						atomic.AddUint64(&p.comparisons, 1)
 					}
+
 					// Fast-path: compare the compile-time fingerprint first. Only
 					// if the fingerprint matches do the expensive deep compare.
-					if snap[idx].fingerprint == cfp && bytecodeEqual(snap[idx].bytecode, cb) {
-						claimed := atomic.CompareAndSwapUint32(&snap[idx].deleted, 0, 1)
+					if cl.fingerprint == cfp && bytecodeEqual(cl.bytecode, cb) {
+						claimed := atomic.CompareAndSwapUint32(&cl.deleted, 0, 1)
 						if p := debugRetractStats.Load(); p != nil {
 							if claimed {
 								atomic.AddUint64(&p.casSuccess, 1)
@@ -1373,7 +1377,7 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 					return Bool(false)
 				}, env)
 			}
-		}(i, capturedBC, capturedFP))
+		}(c, capturedBC, capturedFP, capturedRulified))
 	}
 	return Delay(ks...)
 }
