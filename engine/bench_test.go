@@ -12,7 +12,7 @@ func BenchmarkRetractStress(b *testing.B) {
 	// Keep the benchmark deterministic and small-ish while still exercising
 	// the hot path.
 	const (
-		live = 512
+		live  = 512
 		iters = 200
 	)
 	b.ReportAllocs()

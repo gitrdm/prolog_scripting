@@ -1298,87 +1298,82 @@ func Retract(vm *VM, t Term, k Cont, env *Env) *Promise {
 	snap := u.getClauses()
 	vm.mu.RUnlock()
 
-	ks := make([]func(context.Context) *Promise, len(snap))
-	for i, c := range snap {
-		i := i
-	// capture a reference to the clause's compiled bytecode and the
-	// precomputed rulified term. Clause bytecode is immutable after
-	// compilation, and we cache the rulified form at compile-time to avoid
-	// allocating wrapper terms during Retract. Using these references
-	// avoids repeated allocations and reduces GC pressure in the hot path.
-	capturedBC := c.bytecode
-	raw := c.rulified
+	// Build alternatives lazily: only create closures for active clauses and
+	// avoid capturing heavyweight per-clause terms (like `rulified`) into
+	// every closure. Capturing the clause index and referencing the snapshot
+	// at call time keeps closures small and reduces heap pressure.
+	ks := make([]func(context.Context) *Promise, 0, len(snap))
+	for i := range snap {
+		// skip already-deleted clauses at build time
+		if atomic.LoadUint32(&snap[i].deleted) != 0 {
+			continue
+		}
+		// capture a small copy of the compiled bytecode header only; avoid
+		// capturing the larger `rulified` Term here.
+		capturedBC := snap[i].bytecode
+		capturedFP := snap[i].fingerprint
 
-		ks[i] = func(_ context.Context) *Promise {
-			return Unify(vm, t, raw, func(env *Env) *Promise {
-				if p := debugRetractStats.Load(); p != nil {
-					atomic.AddUint64(&p.attempts, 1)
-				}
-				// Attempt to claim the specific clause this alternative corresponds to.
-				idx := i
-				// skip already-deleted clauses
-				if atomic.LoadUint32(&snap[idx].deleted) != 0 {
-					return Bool(false)
-				}
-				if p := debugRetractStats.Load(); p != nil {
-					atomic.AddUint64(&p.comparisons, 1)
-				}
-				if bytecodeEqual(snap[idx].bytecode, capturedBC) {
-					claimed := atomic.CompareAndSwapUint32(&snap[idx].deleted, 0, 1)
+		// bind i, capturedBC and capturedFP into the closure via a factory to ensure we
+		// don't accidentally capture the loop variable.
+		ks = append(ks, func(idx int, cb bytecode, cfp uint64) func(context.Context) *Promise {
+			return func(_ context.Context) *Promise {
+				// Resolve the normalized clause form at call time from the
+				// snapshot; this avoids storing it on the heap inside every
+				// closure.
+				return Unify(vm, t, snap[idx].rulified, func(env *Env) *Promise {
 					if p := debugRetractStats.Load(); p != nil {
-						if claimed {
-							atomic.AddUint64(&p.casSuccess, 1)
-						} else {
-							atomic.AddUint64(&p.casFail, 1)
-						}
+						atomic.AddUint64(&p.attempts, 1)
 					}
-					if claimed {
-						// Increment per-predicate deleted counter and perform
-						// thresholded compaction to avoid doing O(n) work on
-						// every successful CAS. If the deleted fraction is
-						// high (same heuristic as assertMerge), compact
-						// under vm.mu then call the continuation.
-						atomic.AddInt32(&u.deleted, 1)
+					// Attempt to claim the specific clause this alternative corresponds to.
+					// skip already-deleted clauses
+					if atomic.LoadUint32(&snap[idx].deleted) != 0 {
+						return Bool(false)
+					}
+					if p := debugRetractStats.Load(); p != nil {
+						atomic.AddUint64(&p.comparisons, 1)
+					}
+					// Fast-path: compare the compile-time fingerprint first. Only
+					// if the fingerprint matches do the expensive deep compare.
+					if snap[idx].fingerprint == cfp && bytecodeEqual(snap[idx].bytecode, cb) {
+						claimed := atomic.CompareAndSwapUint32(&snap[idx].deleted, 0, 1)
+						if p := debugRetractStats.Load(); p != nil {
+							if claimed {
+								atomic.AddUint64(&p.casSuccess, 1)
+							} else {
+								atomic.AddUint64(&p.casFail, 1)
+							}
+						}
+						if claimed {
+							atomic.AddInt32(&u.deleted, 1)
 
-						// Determine whether to compact using a safe read of the
-						// current clause slice length under vm.mu. We do a
-						// cheap atomic read of deleted and only take vm.mu's
-						// read lock to inspect the slice length. If compaction
-						// is needed we either enqueue a background compaction
-						// task (preferred) or perform synchronous compaction
-						// depending on configuration and queue state. Lock
-						// ordering is preserved: vm.mu -> u.mu.
-						deleted := atomic.LoadInt32(&u.deleted)
-						if deleted > 0 {
-							vm.mu.RLock()
-							l := len(u.getClauses())
-							vm.mu.RUnlock()
-							if deleted > 32 || int(deleted)*4 > l {
-								if atomic.LoadUint32(&syncCompactOnRetract) != 0 {
-									vm.mu.Lock()
-									compactClauses(u)
-									vm.mu.Unlock()
-								} else {
-									// try to enqueue to the background worker;
-									// fallback to sync if the queue is full.
-									if !enqueueCompaction(vm, u) {
+							deleted := atomic.LoadInt32(&u.deleted)
+							if deleted > 0 {
+								vm.mu.RLock()
+								l := len(u.getClauses())
+								vm.mu.RUnlock()
+								if deleted > 32 || int(deleted)*4 > l {
+									if atomic.LoadUint32(&syncCompactOnRetract) != 0 {
 										vm.mu.Lock()
 										compactClauses(u)
 										vm.mu.Unlock()
+									} else {
+										if !enqueueCompaction(vm, u) {
+											vm.mu.Lock()
+											compactClauses(u)
+											vm.mu.Unlock()
+										}
 									}
 								}
 							}
-						}
 
-						return k(env)
+							return k(env)
+						}
+						return Bool(false)
 					}
 					return Bool(false)
-				}
-				// No matching clause found in the snapshot (another goroutine
-				// removed it or it never matched).
-				return Bool(false)
-			}, env)
-		}
+				}, env)
+			}
+	}(i, capturedBC, capturedFP))
 	}
 	return Delay(ks...)
 }

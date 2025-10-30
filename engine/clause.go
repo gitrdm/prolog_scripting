@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 )
@@ -111,6 +112,8 @@ func compile(t Term, env *Env) (clauses, error) {
 			// cache the rulified form at compile time to avoid allocating a
 			// new wrapper in Retract for every clause scan.
 			c.rulified = rulify(c.raw, env)
+			// compute a small fingerprint of the compiled bytecode for fast-path comparisons
+			c.fingerprint = bytecodeFingerprint(c.bytecode)
 			// store as pointer
 			cs = append(cs, &c)
 		}
@@ -120,12 +123,50 @@ func compile(t Term, env *Env) (clauses, error) {
 	c, err := compileClause(t, nil, env)
 	c.raw = env.simplify(t)
 	c.rulified = rulify(c.raw, env)
+	c.fingerprint = bytecodeFingerprint(c.bytecode)
 	return []*clause{&c}, err
 }
 
+func bytecodeFingerprint(b bytecode) uint64 {
+	const prime uint64 = 1099511628211
+	var h uint64 = 14695981039346656037
+	for _, ins := range b {
+		h ^= uint64(ins.opcode)
+		h *= prime
+		switch v := ins.operand.(type) {
+		case procedureIndicator:
+			// mix name bytes
+			s := v.name.String()
+			for i := 0; i < len(s); i++ {
+				h ^= uint64(s[i])
+				h *= prime
+			}
+			h ^= uint64(int64(v.arity))
+			h *= prime
+		case Integer:
+			h ^= uint64(int64(v))
+			h *= prime
+		case Atom:
+			s := v.String()
+			for i := 0; i < len(s); i++ {
+				h ^= uint64(s[i])
+				h *= prime
+			}
+		default:
+			// fallback: mix the type name to reduce collisions across operand types
+			s := fmt.Sprintf("%T", v)
+			for i := 0; i < len(s); i++ {
+				h ^= uint64(s[i])
+				h *= prime
+			}
+		}
+	}
+	return h
+}
+
 type clause struct {
-	pi       procedureIndicator
-	raw      Term
+	pi  procedureIndicator
+	raw Term
 	// rulified is the canonical rule form of raw, i.e. ensures it's an if/2
 	// term (H:-B). Precomputing this at compile time avoids repeated
 	// allocations in hot paths like Retract where we only need the normalized
@@ -133,6 +174,10 @@ type clause struct {
 	rulified Term
 	vars     []Variable
 	bytecode bytecode
+	// fingerprint is a small, compile-time hash of bytecode used for
+	// fast-rejection in equality checks (cheap and low-collision). It is
+	// computed during compilation to avoid repeated work at runtime.
+	fingerprint uint64
 	// deleted is a marker (0 == active, 1 == deleted) set atomically by Retract/Abolish.
 	deleted uint32
 }
